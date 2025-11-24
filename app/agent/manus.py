@@ -13,7 +13,6 @@ from app.tool.browser_use_tool import BrowserUseTool
 from app.tool.mcp import MCPClients, MCPClientTool
 from app.tool.python_execute import PythonExecute
 from app.tool.str_replace_editor import StrReplaceEditor
-from app.tool.word_document import WordDocumentTool
 
 
 class Manus(ToolCallAgent):
@@ -26,7 +25,7 @@ class Manus(ToolCallAgent):
     next_step_prompt: str = NEXT_STEP_PROMPT
 
     max_observe: int = 10000
-    max_steps: int = 50
+    max_steps: int = 20
 
     # MCP clients for remote tool access
     mcp_clients: MCPClients = Field(default_factory=MCPClients)
@@ -38,7 +37,6 @@ class Manus(ToolCallAgent):
             BrowserUseTool(),
             StrReplaceEditor(),
             AskHuman(),
-            WordDocumentTool(),
             Terminate(),
         )
     )

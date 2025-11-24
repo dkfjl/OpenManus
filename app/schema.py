@@ -52,7 +52,7 @@ class ToolCall(BaseModel):
 
 
 class Message(BaseModel):
-    """Represents a chat message in the conversation"""
+    """Represents a chat message in conversation"""
 
     role: ROLE_TYPE = Field(...)  # type: ignore
     content: Optional[str] = Field(default=None)

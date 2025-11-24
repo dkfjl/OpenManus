@@ -10,7 +10,6 @@ from app.tool.tool_collection import ToolCollection
 from app.tool.web_search import WebSearch
 from app.tool.word_document import WordDocumentTool
 
-
 __all__ = [
     "BaseTool",
     "Bash",

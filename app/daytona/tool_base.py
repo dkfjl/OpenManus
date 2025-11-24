@@ -2,18 +2,24 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar, Dict, Optional
 
-from daytona import Sandbox, SandboxState
+from daytona import Daytona, DaytonaConfig, Sandbox, SandboxState
 from pydantic import Field
 
 from app.config import config
-from app.daytona.sandbox import (
-    create_sandbox,
-    require_daytona_client,
-    start_supervisord_session,
-)
+from app.daytona.sandbox import create_sandbox, start_supervisord_session
 from app.tool.base import BaseTool
 from app.utils.files_utils import clean_path
 from app.utils.logger import logger
+
+
+# load_dotenv()
+daytona_settings = config.daytona
+daytona_config = DaytonaConfig(
+    api_key=daytona_settings.daytona_api_key,
+    server_url=daytona_settings.daytona_server_url,
+    target=daytona_settings.daytona_target,
+)
+daytona = Daytona(daytona_config)
 
 
 @dataclass
@@ -97,8 +103,7 @@ class SandboxToolsBase(BaseTool):
             ):
                 logger.info(f"Sandbox is in {self._sandbox.state} state. Starting...")
                 try:
-                    daytona_client = require_daytona_client()
-                    daytona_client.start(self._sandbox)
+                    daytona.start(self._sandbox)
                     # Wait a moment for the sandbox to initialize
                     # sleep(5)
                     # Refresh sandbox state after starting

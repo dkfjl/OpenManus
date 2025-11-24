@@ -229,7 +229,7 @@ class Config:
 
     def __init__(self):
         if not self._initialized:
-            with self._lock:
+            with cls._lock:
                 if not self._initialized:
                     self._config = None
                     self._load_initial_config()
