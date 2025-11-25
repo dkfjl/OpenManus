@@ -1,4 +1,5 @@
 import time
+from typing import Optional, cast
 
 from daytona import (
     CreateSandboxFromImageParams,
@@ -10,45 +11,62 @@ from daytona import (
     SessionExecuteRequest,
 )
 
-from app.config import config
+from app.config import DaytonaSettings, config
 from app.utils.logger import logger
 
 
-# load_dotenv()
-daytona_settings = config.daytona
-logger.info("Initializing Daytona sandbox configuration")
-daytona_config = DaytonaConfig(
-    api_key=daytona_settings.daytona_api_key,
-    server_url=daytona_settings.daytona_server_url,
-    target=daytona_settings.daytona_target,
-)
+daytona_settings = config.daytona or DaytonaSettings()
+daytona: Optional[Daytona] = None
+daytona_config: Optional[DaytonaConfig] = None
 
-if daytona_config.api_key:
-    logger.info("Daytona API key configured successfully")
+if daytona_settings.daytona_api_key:
+    logger.info("Initializing Daytona sandbox configuration")
+    daytona_config = DaytonaConfig(
+        api_key=daytona_settings.daytona_api_key,
+        server_url=daytona_settings.daytona_server_url,
+        target=daytona_settings.daytona_target,
+    )
+
+    if daytona_config.server_url:
+        logger.info(f"Daytona server URL set to: {daytona_config.server_url}")
+    if daytona_config.target:
+        logger.info(f"Daytona target set to: {daytona_config.target}")
+
+    daytona = Daytona(daytona_config)
+    logger.info("Daytona client initialized")
 else:
-    logger.warning("No Daytona API key found in environment variables")
+    logger.info(
+        "Daytona sandbox integration disabled (no API key configured)."
+    )
 
-if daytona_config.server_url:
-    logger.info(f"Daytona server URL set to: {daytona_config.server_url}")
-else:
-    logger.warning("No Daytona server URL found in environment variables")
+DAYTONA_ENABLED = daytona is not None
 
-if daytona_config.target:
-    logger.info(f"Daytona target set to: {daytona_config.target}")
-else:
-    logger.warning("No Daytona target found in environment variables")
 
-daytona = Daytona(daytona_config)
-logger.info("Daytona client initialized")
+def _daytona_disabled_message() -> str:
+    return (
+        "Daytona sandbox integration is disabled because no API key is configured. "
+        "Set the [daytona] daytona_api_key in config/config.toml or export DAYTONA_API_KEY to enable it."
+    )
+
+
+def ensure_daytona_enabled() -> None:
+    if not DAYTONA_ENABLED:
+        raise RuntimeError(_daytona_disabled_message())
+
+
+def get_daytona_client() -> Daytona:
+    ensure_daytona_enabled()
+    return cast(Daytona, daytona)
 
 
 async def get_or_start_sandbox(sandbox_id: str):
     """Retrieve a sandbox by ID, check its state, and start it if needed."""
 
     logger.info(f"Getting or starting sandbox with ID: {sandbox_id}")
+    client = get_daytona_client()
 
     try:
-        sandbox = daytona.get(sandbox_id)
+        sandbox = client.get(sandbox_id)
 
         # Check if sandbox needs to be started
         if (
@@ -57,11 +75,11 @@ async def get_or_start_sandbox(sandbox_id: str):
         ):
             logger.info(f"Sandbox is in {sandbox.state} state. Starting...")
             try:
-                daytona.start(sandbox)
+                client.start(sandbox)
                 # Wait a moment for the sandbox to initialize
                 # sleep(5)
                 # Refresh sandbox state after starting
-                sandbox = daytona.get(sandbox_id)
+                sandbox = client.get(sandbox_id)
 
                 # Start supervisord in a session when restarting
                 start_supervisord_session(sandbox)
@@ -104,6 +122,7 @@ def create_sandbox(password: str, project_id: str = None):
 
     logger.info("Creating new Daytona sandbox environment")
     logger.info("Configuring sandbox with browser-use image and environment variables")
+    client = get_daytona_client()
 
     labels = None
     if project_id:
@@ -137,7 +156,7 @@ def create_sandbox(password: str, project_id: str = None):
     )
 
     # Create the sandbox
-    sandbox = daytona.create(params)
+    sandbox = client.create(params)
     logger.info(f"Sandbox created with ID: {sandbox.id}")
 
     # Start supervisord in a session for new sandbox
@@ -150,13 +169,14 @@ def create_sandbox(password: str, project_id: str = None):
 async def delete_sandbox(sandbox_id: str):
     """Delete a sandbox by its ID."""
     logger.info(f"Deleting sandbox with ID: {sandbox_id}")
+    client = get_daytona_client()
 
     try:
         # Get the sandbox
-        sandbox = daytona.get(sandbox_id)
+        sandbox = client.get(sandbox_id)
 
         # Delete the sandbox
-        daytona.delete(sandbox)
+        client.delete(sandbox)
 
         logger.info(f"Successfully deleted sandbox {sandbox_id}")
         return True

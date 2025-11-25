@@ -81,6 +81,35 @@ class DocumentSettings(BaseModel):
     )
 
 
+class EmbeddingSettings(BaseModel):
+    profile_name: str = Field(
+        "default",
+        description="LLM profile used to source API credentials for embedding calls",
+    )
+    model: str = Field(
+        "text-embedding-3-small", description="Embedding model or deployment name"
+    )
+    batch_size: int = Field(16, description="Maximum inputs per embedding request")
+    request_timeout: int = Field(30, description="Embedding request timeout (seconds)")
+    max_retries: int = Field(3, description="Retry attempts for transient failures")
+    normalize: bool = Field(True, description="Whether to L2-normalize embeddings")
+
+
+class KnowledgeBaseSettings(BaseModel):
+    storage_dir: str = Field(
+        "vector_store", description="Workspace-relative directory for FAISS data"
+    )
+    chunk_size: int = Field(800, description="Character length of each text chunk")
+    chunk_overlap: int = Field(200, description="Overlap size between chunks")
+    top_k: int = Field(5, description="Default number of retrieval hits")
+    max_context_chars: int = Field(
+        2000, description="Max chars when concatenating retrieved context"
+    )
+    embedding: EmbeddingSettings = Field(
+        default_factory=EmbeddingSettings, description="Embedding configuration"
+    )
+
+
 class BrowserSettings(BaseModel):
     headless: bool = Field(False, description="Whether to run browser in headless mode")
     disable_security: bool = Field(
@@ -210,6 +239,10 @@ class AppConfig(BaseModel):
     document_config: DocumentSettings = Field(
         default_factory=DocumentSettings, description="Document generation settings"
     )
+    knowledge_base_config: KnowledgeBaseSettings = Field(
+        default_factory=KnowledgeBaseSettings,
+        description="Vector knowledge base configuration",
+    )
 
     class Config:
         arbitrary_types_allowed = True
@@ -228,12 +261,13 @@ class Config:
         return cls._instance
 
     def __init__(self):
-        if not self._initialized:
+        cls = self.__class__
+        if not cls._initialized:
             with cls._lock:
-                if not self._initialized:
+                if not cls._initialized:
                     self._config = None
                     self._load_initial_config()
-                    self._initialized = True
+                    cls._initialized = True
 
     @staticmethod
     def _get_config_path() -> Path:
@@ -336,6 +370,11 @@ class Config:
             document_settings = DocumentSettings(**document_config)
         else:
             document_settings = DocumentSettings()
+        knowledge_base_config = raw_config.get("knowledge_base")
+        if knowledge_base_config:
+            knowledge_base_settings = KnowledgeBaseSettings(**knowledge_base_config)
+        else:
+            knowledge_base_settings = KnowledgeBaseSettings()
         config_dict = {
             "llm": {
                 "default": default_settings,
@@ -351,6 +390,7 @@ class Config:
             "run_flow_config": run_flow_settings,
             "daytona_config": daytona_settings,
             "document_config": document_settings,
+            "knowledge_base_config": knowledge_base_settings,
         }
 
         self._config = AppConfig(**config_dict)
@@ -389,6 +429,11 @@ class Config:
     def document_config(self) -> DocumentSettings:
         """Get structured document configuration"""
         return self._config.document_config
+
+    @property
+    def knowledge_base_config(self) -> KnowledgeBaseSettings:
+        """Get vector knowledge base configuration"""
+        return self._config.knowledge_base_config
 
     @property
     def workspace_root(self) -> Path:

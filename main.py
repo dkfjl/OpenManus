@@ -1,13 +1,16 @@
 import argparse
 import asyncio
-from typing import Optional
+from typing import List, Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from app.logger import logger
-from app.services import generate_structured_document, run_manus_flow
+from app.services import (create_structured_document_task,
+                          get_structured_document_task, run_manus_flow)
+from app.services.document_parser_service import DocumentParserService
+from app.services.document_summary_service import DocumentSummaryService
 
 app = FastAPI(title="OpenManus Service", version="1.0.0")
 _service_lock: Optional[asyncio.Lock] = None
@@ -35,11 +38,24 @@ class DocumentRequest(BaseModel):
     )
 
 
+class DocumentProgress(BaseModel):
+    total_sections: int
+    completed_sections: int
+    next_section_index: Optional[int] = None
+    next_section_heading: Optional[str] = None
+    latest_completed_heading: Optional[str] = None
+
+
 class DocumentResponse(BaseModel):
+    task_id: str
     status: str
     filepath: str
     sections: list[str]
     title: str
+    progress: DocumentProgress
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    error: Optional[str] = None
 
 
 @app.on_event("startup")
@@ -80,9 +96,12 @@ async def run_manus_endpoint(payload: RunRequest) -> RunResponse:
 
 @app.post("/documents/structured", response_model=DocumentResponse)
 async def structured_document_endpoint(
-    payload: DocumentRequest,
+    topic: str = Form(..., description="文档主题或题目"),
+    filepath: Optional[str] = Form(default=None, description="可选的存储路径（默认存到 workspace 下）"),
+    language: Optional[str] = Form(default=None, description="输出语言，默认从配置 document.default_language 读取"),
+    upload_files: List[UploadFile] = File(default=[], description="上传的文件，最多3个文件")
 ) -> DocumentResponse:
-    topic = payload.topic.strip()
+    topic = topic.strip()
     if not topic:
         raise HTTPException(status_code=400, detail="Topic must not be empty.")
 
@@ -91,18 +110,66 @@ async def structured_document_endpoint(
             status_code=503, detail="Service is initializing, please retry."
         )
 
-    if _service_lock.locked():
-        raise HTTPException(
-            status_code=409, detail="Agent is already processing another request."
+    # 处理上传的文件并解析内容
+    parser_service = DocumentParserService()
+    summary_service = DocumentSummaryService()
+    parsed_content = ""
+    summary_text = ""
+
+    if upload_files:
+        try:
+            parsed_content = await parser_service.parse_uploaded_files(upload_files)
+            logger.info(f"成功解析 {len(upload_files)} 个上传文件")
+        except Exception as e:
+            logger.error(f"文件解析失败: {e}")
+            raise HTTPException(status_code=400, detail=f"文件解析失败: {str(e)}")
+
+        if parsed_content.strip():
+            try:
+                summary_text = await summary_service.summarize(
+                    parsed_content, language=language
+                )
+                logger.info("上传文件摘要生成成功")
+            except Exception as e:
+                logger.error(f"文件摘要生成失败: {e}")
+                raise HTTPException(status_code=500, detail="文件摘要生成失败，请稍后重试")
+
+    # 将摘要拼接到主题中
+    enhanced_topic = topic
+    if summary_text.strip():
+        enhanced_topic = (
+            f"{topic}\n\n以下是根据上传文件提炼的摘要，请结合这些要点生成文档：\n{summary_text}"
         )
 
-    async with _service_lock:
-        doc_info = await generate_structured_document(
-            topic=topic,
-            filepath=payload.filepath,
-            language=payload.language,
+    doc_info = await create_structured_document_task(
+        topic=enhanced_topic,
+        filepath=filepath,
+        language=language,
+        reference_content=parsed_content,
+    )
+    return DocumentResponse(**doc_info)
+
+
+@app.get("/documents/structured/{task_id}", response_model=DocumentResponse)
+async def structured_document_status(task_id: str) -> DocumentResponse:
+    if _service_lock is None:
+        raise HTTPException(
+            status_code=503, detail="Service is initializing, please retry."
         )
-        return DocumentResponse(status="completed", **doc_info)
+
+    try:
+        doc_info = await get_structured_document_task(task_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return DocumentResponse(**doc_info)
+
+
+@app.get("/documents/supported-formats")
+async def get_supported_formats():
+    """获取支持的文件格式信息"""
+    parser_service = DocumentParserService()
+    return parser_service.get_supported_formats()
 
 
 def parse_args() -> argparse.Namespace:
@@ -111,7 +178,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--prompt", type=str, help="Run once with the given prompt.")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Server host.")
-    parser.add_argument("--port", type=int, default=8000, help="Server port.")
+    parser.add_argument("--port", type=int, default=10000, help="Server port.")
     return parser.parse_args()
 
 
