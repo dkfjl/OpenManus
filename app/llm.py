@@ -29,6 +29,7 @@ from app.schema import (
     Message,
     ToolChoice,
 )
+from app.services.execution_log_service import log_execution_event
 
 
 REASONING_MODELS = ["o1", "o3-mini"]
@@ -226,6 +227,38 @@ class LLM:
 
             self.token_counter = TokenCounter(self.tokenizer)
 
+    @staticmethod
+    def _truncate_text(value: Optional[str], limit: int = 200) -> str:
+        text = value or ""
+        return text if len(text) <= limit else text[:limit] + "..."
+
+    def _messages_snapshot(
+        self, messages: List[dict], max_items: int = 3
+    ) -> List[dict]:
+        snapshot: List[dict] = []
+        if not messages:
+            return snapshot
+        for msg in messages[-max_items:]:
+            content = msg.get("content", "")
+            text_value = ""
+            if isinstance(content, list):
+                parts: List[str] = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        parts.append(item.get("text", ""))
+                    elif isinstance(item, str):
+                        parts.append(item)
+                text_value = " ".join(parts)
+            else:
+                text_value = str(content or "")
+            snapshot.append(
+                {
+                    "role": msg.get("role"),
+                    "preview": self._truncate_text(text_value, 200),
+                }
+            )
+        return snapshot
+
     def count_tokens(self, text: str) -> int:
         """Calculate the number of tokens in a text"""
         if not text:
@@ -403,6 +436,17 @@ class LLM:
                 # Raise a special exception that won't be retried
                 raise TokenLimitExceeded(error_message)
 
+            log_execution_event(
+                "llm_call",
+                "LLM.ask request prepared",
+                {
+                    "model": self.model,
+                    "stream": stream,
+                    "input_tokens": input_tokens,
+                    "message_snapshot": self._messages_snapshot(messages),
+                },
+            )
+
             params = {
                 "model": self.model,
                 "messages": messages,
@@ -428,6 +472,19 @@ class LLM:
                 # Update token counts
                 self.update_token_count(
                     response.usage.prompt_tokens, response.usage.completion_tokens
+                )
+
+                log_execution_event(
+                    "llm_call",
+                    "LLM.ask response received",
+                    {
+                        "model": self.model,
+                        "prompt_tokens": response.usage.prompt_tokens,
+                        "completion_tokens": response.usage.completion_tokens,
+                        "response_preview": self._truncate_text(
+                            response.choices[0].message.content
+                        ),
+                    },
                 )
 
                 return response.choices[0].message.content
@@ -456,6 +513,15 @@ class LLM:
                 f"Estimated completion tokens for streaming response: {completion_tokens}"
             )
             self.total_completion_tokens += completion_tokens
+            log_execution_event(
+                "llm_call",
+                "LLM.ask streaming response received",
+                {
+                    "model": self.model,
+                    "estimated_completion_tokens": completion_tokens,
+                    "response_preview": self._truncate_text(full_response),
+                },
+            )
 
             return full_response
 
@@ -572,6 +638,17 @@ class LLM:
             if not self.check_token_limit(input_tokens):
                 raise TokenLimitExceeded(self.get_limit_error_message(input_tokens))
 
+            log_execution_event(
+                "llm_call",
+                "LLM.ask_with_images request prepared",
+                {
+                    "model": self.model,
+                    "input_tokens": input_tokens,
+                    "image_count": len(images),
+                    "message_snapshot": self._messages_snapshot(all_messages),
+                },
+            )
+
             # Set up API parameters
             params = {
                 "model": self.model,
@@ -596,6 +673,18 @@ class LLM:
                     raise ValueError("Empty or invalid response from LLM")
 
                 self.update_token_count(response.usage.prompt_tokens)
+                log_execution_event(
+                    "llm_call",
+                    "LLM.ask_with_images response received",
+                    {
+                        "model": self.model,
+                        "prompt_tokens": response.usage.prompt_tokens,
+                        "completion_tokens": response.usage.completion_tokens,
+                        "response_preview": self._truncate_text(
+                            response.choices[0].message.content
+                        ),
+                    },
+                )
                 return response.choices[0].message.content
 
             # Handle streaming request
@@ -614,6 +703,15 @@ class LLM:
             if not full_response:
                 raise ValueError("Empty response from streaming LLM")
 
+            log_execution_event(
+                "llm_call",
+                "LLM.ask_with_images streaming response",
+                {
+                    "model": self.model,
+                    "estimated_completion_tokens": self.count_tokens(full_response),
+                    "response_preview": self._truncate_text(full_response),
+                },
+            )
             return full_response
 
         except TokenLimitExceeded:
@@ -742,6 +840,26 @@ class LLM:
             # Update token counts
             self.update_token_count(
                 response.usage.prompt_tokens, response.usage.completion_tokens
+            )
+
+            tool_names = []
+            if response.choices[0].message.tool_calls:
+                tool_names = [call.function.name for call in response.choices[0].message.tool_calls]
+
+            log_execution_event(
+                "llm_call",
+                "LLM.ask_tool response received",
+                {
+                    "model": self.model,
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "tool_calls": tool_names,
+                    "response_preview": self._truncate_text(
+                        response.choices[0].message.content
+                        if response.choices[0].message.content
+                        else ""
+                    ),
+                },
             )
 
             return response.choices[0].message

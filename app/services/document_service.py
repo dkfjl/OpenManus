@@ -12,6 +12,9 @@ from app.config import config
 from app.llm import LLM
 from app.logger import logger
 from app.schema import Message
+from app.services.execution_log_service import (attach_execution_log,
+                                                end_execution_log,
+                                                log_execution_event)
 from app.tool.word_document import WordDocumentTool
 
 
@@ -40,12 +43,30 @@ class DocumentGenerator:
         filepath: Optional[str] = None,
         language: Optional[str] = None,
         reference_content: Optional[str] = None,
+        reference_sources: Optional[List[str]] = None,
+        execution_log_id: Optional[str] = None,
     ) -> dict:
         language = language or self.settings.default_language
         doc_path = self._resolve_path(filepath or self._default_filename(topic))
+        log_execution_event(
+            "structured_doc",
+            "Building outline",
+            {"topic": topic, "language": language, "filepath": str(doc_path)},
+        )
         plan = await self._build_outline(topic=topic, language=language)
+        self._ensure_section_subtopics(plan)
+        log_execution_event(
+            "structured_doc",
+            "Outline ready",
+            {"title": plan.title, "sections": len(plan.sections)},
+        )
         await self._write_table_of_contents(
             topic=topic, plan=plan, doc_path=doc_path, language=language
+        )
+        log_execution_event(
+            "structured_doc",
+            "Table of contents written",
+            {"doc_path": str(doc_path)},
         )
         metadata = self._initialize_metadata(
             topic=topic,
@@ -53,8 +74,19 @@ class DocumentGenerator:
             plan=plan,
             doc_path=doc_path,
             reference_content=reference_content,
+            reference_sources=reference_sources,
+            execution_log_id=execution_log_id,
         )
         self._save_metadata(metadata)
+        log_execution_event(
+            "structured_doc",
+            "Metadata initialized",
+            {
+                "task_id": metadata["task_id"],
+                "doc_path": str(doc_path),
+                "execution_log_id": metadata.get("execution_log_id"),
+            },
+        )
         logger.info(
             "Structured document task %s created with %d sections",
             metadata["task_id"],
@@ -70,6 +102,20 @@ class DocumentGenerator:
         if metadata.get("status") == "completed":
             logger.info("Task %s already completed", task_id)
             return metadata
+
+        log_session = None
+        if metadata.get("execution_log_id"):
+            log_session = attach_execution_log(metadata.get("execution_log_id"))
+            if log_session:
+                log_execution_event(
+                    "structured_doc",
+                    "Resuming structured document task",
+                    {
+                        "task_id": task_id,
+                        "status": metadata.get("status"),
+                        "next_section": metadata.get("next_section_index", 0),
+                    },
+                )
 
         doc_path = Path(metadata["filepath"])
         doc_path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +136,7 @@ class DocumentGenerator:
         language = metadata.get("language", self.settings.default_language)
         topic = metadata.get("topic", "")
         reference_material = metadata.get("reference_content", "")
+        reference_sources = metadata.get("reference_sources", [])
 
         try:
             for idx in range(start_index, total_sections):
@@ -100,6 +147,15 @@ class DocumentGenerator:
                     subtopics=section_data.get("subtopics", []),
                 )
 
+                log_execution_event(
+                    "structured_doc",
+                    "Composing section",
+                    {
+                        "task_id": task_id,
+                        "section_index": idx,
+                        "heading": section.heading,
+                    },
+                )
                 content = await self._compose_section_content(
                     topic=topic,
                     section=section,
@@ -127,16 +183,61 @@ class DocumentGenerator:
                 metadata["latest_completed_heading"] = section.heading
                 metadata["next_section_index"] = idx + 1
                 self._save_metadata(metadata)
+                log_execution_event(
+                    "structured_doc",
+                    "Section completed",
+                    {
+                        "task_id": task_id,
+                        "section_index": idx,
+                        "heading": section.heading,
+                    },
+                )
 
             metadata["status"] = "completed"
             self._save_metadata(metadata)
             logger.info("Structured document task %s completed", task_id)
+            if reference_sources:
+                await self._write_reference_appendix(
+                    doc_path=doc_path,
+                    sources=reference_sources,
+                    language=language,
+                )
+                metadata["appendix_written"] = True
+                self._save_metadata(metadata)
+                log_execution_event(
+                    "structured_doc",
+                    "Reference appendix added",
+                    {"task_id": task_id, "source_count": len(reference_sources)},
+                )
+            log_execution_event(
+                "structured_doc",
+                "Structured document task completed",
+                {"task_id": task_id, "filepath": str(doc_path)},
+            )
+            if log_session:
+                end_execution_log(
+                    status="completed",
+                    details={"task_id": task_id, "filepath": str(doc_path)},
+                )
         except Exception as exc:
             metadata["status"] = "failed"
             metadata["error"] = str(exc)
             self._save_metadata(metadata)
             logger.exception("Structured document task %s failed", task_id)
+            log_execution_event(
+                "error",
+                "Structured document task failed",
+                {"task_id": task_id, "error": str(exc)},
+            )
+            if log_session:
+                end_execution_log(
+                    status="failed",
+                    details={"task_id": task_id, "error": str(exc)},
+                )
             raise
+        finally:
+            if log_session:
+                log_session.deactivate()
 
         return metadata
 
@@ -155,7 +256,8 @@ class DocumentGenerator:
         sections_target = self.settings.outline_sections
         user_text = (
             f"为主题《{topic}》设计一份{language}报告的大纲。"
-            f"需要 4~{sections_target} 个主要章节，每章包含一句话总结和 2-4 个关键要点。"
+            f"需要 4~{sections_target} 个主要章节，每章必须包含一句话总结，并提供 EXACT 3 个关键要点。"
+            "每个关键要点要具体可执行，长度控制在15~25字，并使用 'subtopics' 数组给出。"
             "请严格按照以下 JSON 结构输出：\n"
             '{'
             '"title": "报告标题",'
@@ -201,6 +303,9 @@ class DocumentGenerator:
             if descriptor:
                 line += f" —— {descriptor}"
             lines.append(line)
+            if section.subtopics:
+                for sub_idx, subtopic in enumerate(section.subtopics, start=1):
+                    lines.append(f"    - 要点{sub_idx}: {subtopic}")
 
         body_text = "\n".join(lines)
         await self.word_tool.execute(
@@ -209,6 +314,16 @@ class DocumentGenerator:
             body=body_text,
             append=False,
         )
+
+    def _ensure_section_subtopics(self, plan: DocumentPlan):
+        fallback_points = ["背景与现状", "挑战与机遇", "策略与行动"]
+        for section in plan.sections:
+            subtopics = [sub.strip() for sub in (section.subtopics or []) if sub and sub.strip()]
+            if len(subtopics) < 3:
+                subtopics.extend(fallback_points[len(subtopics) : 3])
+            elif len(subtopics) > 3:
+                subtopics = subtopics[:3]
+            section.subtopics = subtopics or fallback_points.copy()
 
     async def _compose_section_content(
         self,
@@ -220,26 +335,34 @@ class DocumentGenerator:
         reference_material: str = "",
     ) -> str:
         min_words = self.settings.min_section_words
-        key_points = "、".join(section.subtopics) if section.subtopics else ""
+        key_points_sequence = section.subtopics or ["背景与现状", "挑战与机遇", "策略与行动"]
+        structured_brief = "\n".join(
+            [f"{idx + 1}. {point}" for idx, point in enumerate(key_points_sequence)]
+        )
 
         system_text = (
             "You are a senior economic planning writer. "
             f"Write in fluent {language}, providing analysis, data references, and actionable suggestions. "
             f"Each section must contain at least {min_words} words, using multiple paragraphs."
         )
-        reference_excerpt = self._prepare_reference_excerpt(reference_material)
 
         user_text = (
             f"总主题：{topic}\n"
             f"当前章节：{section.heading} （第 {section_index} / {total_sections} 部分）\n"
             f"章节定位：{section.summary or '无'}\n"
-            f"关键要点：{key_points or '自行补充'}\n"
-            "请输出多段落正文，可在结尾给出条列建议。"
+            "关键要点（请严格按顺序展开，每个要点至少两段正文，且以小标题或粗体引导）：\n"
+            f"{structured_brief}\n"
+            "请先给出三个要点的简要导言，然后依次撰写对应段落，最后补充一个总结段与3条可执行建议。"
         )
 
-        if reference_excerpt:
-            user_text += "\n\n以下是上传文档的关键信息，请优先引用并补充：\n"
-            user_text += reference_excerpt
+        reference_text = (reference_material or "").strip()
+
+        # 传入完整解析文本，让模型根据当前章节挑选最合适的素材
+        if reference_text:
+            user_text += (
+                "\n\n上传文档解析全文如下，请聚焦当前章节的主题摘取或概括相关事实、数据与论据：\n"
+            )
+            user_text += reference_text
 
         content = await self.llm.ask(
             [Message.user_message(user_text)],
@@ -300,6 +423,8 @@ class DocumentGenerator:
         plan: DocumentPlan,
         doc_path: Path,
         reference_content: Optional[str] = None,
+        reference_sources: Optional[List[str]] = None,
+        execution_log_id: Optional[str] = None,
     ) -> dict:
         task_id = uuid.uuid4().hex
         now = self._now()
@@ -310,7 +435,9 @@ class DocumentGenerator:
             "language": language,
             "title": plan.title,
             "filepath": str(doc_path),
-            "reference_content": reference_content or "",
+            "reference_content": (reference_content or ""),
+            "reference_sources": reference_sources or [],
+            "execution_log_id": execution_log_id,
             "sections": [
                 {
                     "heading": section.heading,
@@ -325,20 +452,6 @@ class DocumentGenerator:
             "created_at": now,
             "updated_at": now,
         }
-
-    def _prepare_reference_excerpt(self, reference_material: str) -> str:
-        text = (reference_material or "").strip()
-        if not text:
-            return ""
-        max_chars = getattr(self.settings, "max_reference_chars", 6000)
-        if len(text) <= max_chars:
-            return text
-        logger.warning(
-            "Reference material length %d exceeds limit %d, truncating",
-            len(text),
-            max_chars,
-        )
-        return text[:max_chars]
 
     def _build_progress(self, metadata: dict) -> dict:
         sections = metadata.get("sections", [])
@@ -364,10 +477,46 @@ class DocumentGenerator:
             "title": metadata.get("title") or "",
             "sections": [section.get("heading", "") for section in metadata.get("sections", [])],
             "progress": progress,
+            "execution_log_id": metadata.get("execution_log_id"),
+            "reference_sources": metadata.get("reference_sources", []),
             "created_at": metadata.get("created_at"),
             "updated_at": metadata.get("updated_at"),
             "error": metadata.get("error"),
         }
+
+    async def _write_reference_appendix(
+        self, doc_path: Path, sources: List[str], language: Optional[str]
+    ):
+        lang = (language or self.settings.default_language).lower()
+        heading = "附录：参考资料" if lang.startswith("zh") else "Appendix: References"
+        intro = (
+            "以下条目为本次文档生成过程中参考的外部资料，请在进一步使用前核实其最新版内容。"
+            if lang.startswith("zh")
+            else "The following materials were referenced during document generation; please verify the latest versions before use."
+        )
+        lines = [intro, ""]
+        # Preserve order while removing duplicates / blanks
+        seen = set()
+        unique_sources: List[str] = []
+        for source in sources:
+            label = (source or "未命名资料").strip()
+            if not label:
+                label = "未命名资料"
+            if label not in seen:
+                seen.add(label)
+                unique_sources.append(label)
+        for idx, src in enumerate(unique_sources, start=1):
+            lines.append(f"{idx}. {src}")
+        await self.word_tool.execute(
+            filepath=str(doc_path),
+            append=True,
+            sections=[
+                {
+                    "heading": heading,
+                    "content": "\n".join(lines),
+                }
+            ],
+        )
 
     @staticmethod
     def _now() -> str:
@@ -393,6 +542,8 @@ async def create_structured_document_task(
     filepath: Optional[str] = None,
     language: Optional[str] = None,
     reference_content: Optional[str] = None,
+    reference_sources: Optional[List[str]] = None,
+    execution_log_id: Optional[str] = None,
 ) -> dict:
     generator = DocumentGenerator()
     metadata = await generator.create_task(
@@ -400,6 +551,8 @@ async def create_structured_document_task(
         filepath=filepath,
         language=language,
         reference_content=reference_content,
+        reference_sources=reference_sources,
+        execution_log_id=execution_log_id,
     )
     progress = generator._build_progress(metadata)
     response = generator._build_response(metadata, progress)

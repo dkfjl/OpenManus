@@ -9,6 +9,7 @@ from app.exceptions import TokenLimitExceeded
 from app.logger import logger
 from app.prompt.toolcall import NEXT_STEP_PROMPT, SYSTEM_PROMPT
 from app.schema import TOOL_CHOICE_TYPE, AgentState, Message, ToolCall, ToolChoice
+from app.services.execution_log_service import log_execution_event
 from app.tool import CreateChatCompletion, Terminate, ToolCollection
 
 
@@ -87,6 +88,15 @@ class ToolCallAgent(ReActAgent):
                 f"🧰 Tools being prepared: {[call.function.name for call in tool_calls]}"
             )
             logger.info(f"🔧 Tool arguments: {tool_calls[0].function.arguments}")
+        log_execution_event(
+            "agent_thought",
+            f"{self.name} reasoning step",
+            {
+                "content": content,
+                "tool_count": len(tool_calls) if tool_calls else 0,
+                "tool_names": [call.function.name for call in tool_calls] if tool_calls else [],
+            },
+        )
 
         try:
             if response is None:
@@ -150,6 +160,11 @@ class ToolCallAgent(ReActAgent):
             logger.info(
                 f"🎯 Tool '{command.function.name}' completed its mission! Result: {result}"
             )
+            log_execution_event(
+                "agent_tool",
+                f"Tool {command.function.name} finished",
+                {"result_preview": str(result)[:400], "tool_call_id": command.id},
+            )
 
             # Add tool response to memory
             tool_msg = Message.tool_message(
@@ -178,6 +193,11 @@ class ToolCallAgent(ReActAgent):
 
             # Execute the tool
             logger.info(f"🔧 Activating tool: '{name}'...")
+            log_execution_event(
+                "agent_tool",
+                f"Executing tool {name}",
+                {"arguments": args, "tool_call_id": command.id},
+            )
             result = await self.available_tools.execute(name=name, tool_input=args)
 
             # Handle special tools
@@ -201,10 +221,20 @@ class ToolCallAgent(ReActAgent):
             logger.error(
                 f"📝 Oops! The arguments for '{name}' don't make sense - invalid JSON, arguments:{command.function.arguments}"
             )
+            log_execution_event(
+                "agent_tool",
+                f"Invalid arguments for tool {name}",
+                {"tool_call_id": command.id, "raw_arguments": command.function.arguments},
+            )
             return f"Error: {error_msg}"
         except Exception as e:
             error_msg = f"⚠️ Tool '{name}' encountered a problem: {str(e)}"
             logger.exception(error_msg)
+            log_execution_event(
+                "agent_tool",
+                f"Tool {name} execution failed",
+                {"tool_call_id": command.id, "error": str(e)},
+            )
             return f"Error: {error_msg}"
 
     async def _handle_special_tool(self, name: str, result: Any, **kwargs):
