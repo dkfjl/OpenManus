@@ -3,6 +3,11 @@ from __future__ import annotations
 import json
 import re
 from typing import Dict, List, Optional
+from copy import deepcopy
+from urllib.parse import urljoin
+
+import requests
+from bs4 import BeautifulSoup
 
 from app.llm import LLM
 from app.logger import logger
@@ -62,6 +67,7 @@ async def generate_aippt_outline(
 2. 包含封面页、目录页、过渡页、内容页、结束页
 3. 每个内容页包含2-4个要点，每个要点不少于100字，并在恰当的地方引用案例说明
 4. 内容要有逻辑性和层次性
+5. 目录中的每一条目都必须在目录页之后依次对应两张页面：先 transition(标题=该目录条目)，再 content(标题建议与目录条目一致或更具体)；保证目录条目数量与随后 (transition+content) 组数完全一致；输出顺序严格为 cover → contents → (transition+content)* → end。
 
 PPT页面类型定义：
 
@@ -112,9 +118,36 @@ PPT页面类型定义：
 
 请生成完整的PPT大纲JSON数组，包含所有页面类型。"""
 
+    # Optional extension: instruct how to represent images and tables inside content slides
+    prompt_template += (
+        "\n扩展说明（可选）：\n"
+        "- 若需要在内容页展示图片，请在 data.items 中加入 {\"type\": \"image\", \"title\": \"图片标题\", \"caption\": \"可选说明\", \"url\": \"图片URL\" 或 \"path\": \"本地路径\" 或 \"base64\": \"数据\"}。\n"
+        "- 若需要在内容页展示表格，请在 data.items 中加入 {\"type\": \"table\", \"title\": \"表格标题\", \"headers\": [..], \"rows\": [[..],[..]]}。\n"
+        "- 仍需保持整体结构为 [cover, contents, (transition+content)*, end]。\n"
+    )
+
+    
+
     # Add reference content if provided
     if reference_content and reference_content.strip():
         prompt_template += f"\n\n参考材料：\n{reference_content[:2000]}"
+
+    # Auto-gather web materials (text snippets, candidate tables and image URLs)
+    try:
+        web_text, web_tables, web_images = _auto_gather_web_assets(topic)
+        if web_text:
+            prompt_template += "\n\n参考网页摘要：\n" + web_text
+        if web_tables:
+            # include up to 2 small tables json in prompt
+            import json as _json
+            tables_json = _json.dumps(web_tables[:2], ensure_ascii=False)
+            prompt_template += "\n\n参考网页表格JSON（节选）：\n" + tables_json
+        if web_images:
+            prompt_template += "\n\n参考图片URL（节选）：\n- " + "\n- ".join(web_images[:5])
+    except Exception:
+        pass
+
+    
 
     try:
         # Initialize LLM client
@@ -136,6 +169,8 @@ PPT页面类型定义：
 
         # Validate the outline structure
         validated_outline = _validate_outline(outline_json, topic)
+        # Enforce TOC alignment: ensure (transition+content) pairs match contents items
+        validated_outline = _enforce_toc_alignment(validated_outline, topic)
 
         log_execution_event(
             "aippt_outline",
@@ -285,6 +320,86 @@ def _validate_outline(outline: List[dict], topic: str) -> List[dict]:
     return validated
 
 
+def _extract_toc_items(outline: List[dict]) -> List[str]:
+    for slide in outline:
+        if isinstance(slide, dict) and slide.get("type") == "contents":
+            data = slide.get("data", {}) or {}
+            items = data.get("items", []) or []
+            result: List[str] = []
+            for it in items:
+                if isinstance(it, str):
+                    result.append(it.strip())
+                elif isinstance(it, dict):
+                    title = it.get("title") or it.get("text") or ""
+                    if isinstance(title, str) and title.strip():
+                        result.append(title.strip())
+            return result
+    return []
+
+
+def _enforce_toc_alignment(outline: List[dict], topic: str) -> List[dict]:
+    if not outline:
+        return outline
+    toc_items = _extract_toc_items(outline)
+    if not toc_items:
+        return outline
+
+    # Keep cover, contents, collect the rest to reuse content pages if any
+    cover = None
+    contents = None
+    end_slide = None
+    other_slides: List[dict] = []
+    for s in outline:
+        t = s.get("type") if isinstance(s, dict) else None
+        if t == "cover" and cover is None:
+            cover = s
+        elif t == "contents" and contents is None:
+            contents = s
+        elif t == "end":
+            end_slide = s
+        else:
+            other_slides.append(s)
+
+    # Rebuild sequence: cover → contents → (transition+content)* → end
+    new_outline: List[dict] = []
+    if cover:
+        new_outline.append(cover)
+    if contents:
+        new_outline.append(contents)
+
+    # Reuse existing content slides in order where possible
+    remaining_contents = [s for s in other_slides if isinstance(s, dict) and s.get("type") == "content"]
+
+    for item in toc_items:
+        # transition
+        new_outline.append({
+            "type": "transition",
+            "data": {"title": item, "text": ""}
+        })
+        # content
+        if remaining_contents:
+            c = remaining_contents.pop(0)
+            # If content lacks title, set it to item
+            try:
+                cdata = c.setdefault("data", {})
+                if not cdata.get("title"):
+                    cdata["title"] = item
+            except Exception:
+                pass
+            new_outline.append(c)
+        else:
+            new_outline.append({
+                "type": "content",
+                "data": {"title": item, "items": []}
+            })
+
+    if end_slide is None:
+        end_slide = {"type": "end"}
+    new_outline.append(end_slide)
+
+    return new_outline
+
+
 def _create_fallback_outline(topic: str, language: str) -> List[dict]:
     """Create a basic fallback outline when generation fails"""
     if language == "zh":
@@ -354,70 +469,89 @@ def _create_fallback_outline(topic: str, language: str) -> List[dict]:
                 "type": "end"
             }
         ]
-    else:
-        return [
-            {
-                "type": "cover",
-                "data": {
-                    "title": topic,
-                    "text": "Auto-generated Presentation"
-                }
-            },
-            {
-                "type": "contents",
-                "data": {
-                    "items": ["Overview", "Main Content", "Conclusion"]
-                }
-            },
-            {
-                "type": "content",
-                "data": {
-                    "title": "Overview",
-                    "items": [
-                        {
-                            "title": "Background",
-                            "text": "Background information"
-                        },
-                        {
-                            "title": "Objectives",
-                            "text": "Presentation objectives"
-                        }
-                    ]
-                }
-            },
-            {
-                "type": "content",
-                "data": {
-                    "title": "Main Content",
-                    "items": [
-                        {
-                            "title": "Key Points",
-                            "text": "Main content and analysis"
-                        },
-                        {
-                            "title": "Details",
-                            "text": "Further explanations"
-                        }
-                    ]
-                }
-            },
-            {
-                "type": "content",
-                "data": {
-                    "title": "Conclusion",
-                    "items": [
-                        {
-                            "title": "Summary",
-                            "text": "Summary of main points"
-                        },
-                        {
-                            "title": "Future",
-                            "text": "Future directions"
-                        }
-                    ]
-                }
-            },
-            {
-                "type": "end"
-            }
-        ]
+
+
+def _auto_gather_web_assets(topic: str, max_pages: int = 2):
+    """Search the web for the topic and collect small text snippets, simple tables and image URLs.
+
+    Returns: (text_snippet: str, tables: List[dict], images: List[str])
+    - tables use structure: {"title": str, "headers": [..], "rows": [[..],[..]]}
+    - images: absolute URLs
+    """
+    from app.tool.web_search import WebSearch
+
+    images: List[str] = []
+    tables: List[Dict] = []
+    texts: List[str] = []
+
+    ws = WebSearch()
+    # We do not fetch content here to re-fetch raw HTML for tables/images
+    loop = asyncio.get_event_loop()
+    search = loop.run_until_complete(
+        ws.execute(query=topic, num_results=max_pages, fetch_content=False)
+    )
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    }
+    for res in search.results[:max_pages]:
+        try:
+            resp = requests.get(res.url, headers=headers, timeout=8)
+            if resp.status_code != 200 or not resp.text:
+                continue
+            soup = BeautifulSoup(resp.text, "html.parser")
+            # text snippet
+            text = " ".join(soup.get_text(separator=" ", strip=True).split())
+            if text:
+                texts.append(text[:600])
+            # images: prefer og:image and img[src]
+            og = soup.find("meta", property="og:image")
+            if og and og.get("content"):
+                images.append(urljoin(res.url, og.get("content")))
+            for img in soup.find_all("img"):
+                src = img.get("src") or img.get("data-src")
+                if not src:
+                    continue
+                absu = urljoin(res.url, src)
+                if any(absu.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+                    images.append(absu)
+                if len(images) >= 8:
+                    break
+            # tables: first table
+            for tb in soup.find_all("table")[:1]:
+                headers_row = []
+                first_tr = tb.find("tr")
+                if tb.find_all("th"):
+                    headers_row = [th.get_text(strip=True)[:50] for th in tb.find_all("th")]
+                elif first_tr:
+                    headers_row = [td.get_text(strip=True)[:50] for td in first_tr.find_all("td")]
+                rows = []
+                trs = tb.find_all("tr")
+                # skip first row if used for headers
+                start_idx = 1 if headers_row and len(trs) > 1 else 0
+                for tr in trs[start_idx : start_idx + 5]:
+                    row = [td.get_text(strip=True)[:80] for td in tr.find_all(["td", "th"])]
+                    if any(cell for cell in row):
+                        rows.append(row)
+                if headers_row or rows:
+                    title = (
+                        soup.title.string[:60]
+                        if soup.title and soup.title.string
+                        else res.title
+                    )
+                    tables.append({"title": title, "headers": headers_row, "rows": rows})
+        except Exception:
+            continue
+
+    # de-dup images and trim
+    uniq_images = []
+    seen = set()
+    for u in images:
+        if u and u not in seen:
+            uniq_images.append(u)
+            seen.add(u)
+        if len(uniq_images) >= 8:
+            break
+
+    text_snippet = ("\n\n".join(texts))[:1200]
+    return text_snippet, tables, uniq_images
+        

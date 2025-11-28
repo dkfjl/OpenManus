@@ -7,6 +7,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+import base64
+import io
+import requests
+from typing import Tuple
 from typing import Any, Dict, List, Optional
 
 from pptx import Presentation
@@ -15,6 +19,7 @@ from pptx.enum.text import PP_ALIGN
 from pptx.util import Inches, Pt
 
 from app.logger import logger
+from app.config import config
 from app.services.execution_log_service import log_execution_event
 
 
@@ -204,13 +209,26 @@ class AIPPTToPPTXService:
         if slide.shapes.title:
             slide.shapes.title.text = title
 
-        # 设置内容项
+        # 将 items 分类：文本、图片、表格
+        text_items: list = []
+        image_items: list = []
+        table_items: list = []
+        for it in items:
+            if isinstance(it, dict) and it.get("type") in ("image", "table"):
+                if it.get("type") == "image":
+                    image_items.append(it)
+                else:
+                    table_items.append(it)
+            else:
+                text_items.append(it)
+
+        # 文本要点写入内容占位
         if len(slide.placeholders) > 1:
             content_shape = slide.placeholders[1]
             content_shape.text = ""
             tf = content_shape.text_frame
 
-            for i, item in enumerate(items):
+            for i, item in enumerate(text_items):
                 if isinstance(item, dict):
                     item_title = item.get("title", "")
                     item_text = item.get("text", "")
@@ -218,27 +236,109 @@ class AIPPTToPPTXService:
                     item_title = str(item)
                     item_text = ""
 
-                if i > 0:
-                    p = tf.add_paragraph()
-                else:
-                    p = tf.paragraphs[0]
-
+                p = tf.add_paragraph() if i > 0 else tf.paragraphs[0]
                 if item_title and item_text:
                     p.text = f"• {item_title}: {item_text}"
                 elif item_title:
                     p.text = f"• {item_title}"
                 else:
                     p.text = f"• {item_text}"
-
                 p.font.size = Pt(20)
                 p.level = 0
 
-                # 如果有详细文本，添加为子项
                 if item_text and item_title and len(item_text) > 50:
                     detail_p = tf.add_paragraph()
                     detail_p.text = f"  {item_text}"
                     detail_p.font.size = Pt(18)
                     detail_p.level = 1
+
+        # 计算右侧区域用于放置图片/表格
+        slide_w = self.prs.slide_width
+        slide_h = self.prs.slide_height
+        margin = Inches(0.5)
+        right_left = int(slide_w * 0.55)
+        right_top = int(slide_h * 0.25)
+        right_w = slide_w - right_left - margin
+        block_h = int(slide_h * 0.5)
+
+        # 帮助函数：解析图片源
+        def _resolve_image_source(item: Dict[str, Any]) -> Tuple[io.BytesIO | str | None, str]:
+            # 返回 (image_file_or_stream, hint)
+            # 优先使用 path；其次 base64；url 仅作为占位提示
+            path = item.get("path") or item.get("file") or item.get("local_path")
+            if isinstance(path, str) and path:
+                p = Path(path)
+                if not p.is_absolute():
+                    p = (config.workspace_root / p).resolve()
+                if p.exists():
+                    return str(p), str(p)
+            b64 = item.get("base64")
+            if isinstance(b64, str) and b64:
+                try:
+                    raw = base64.b64decode(b64)
+                    return io.BytesIO(raw), "base64"
+                except Exception:
+                    pass
+            url = item.get("url")
+            if isinstance(url, str) and url:
+                try:
+                    resp = requests.get(url, timeout=8)
+                    if resp.status_code == 200:
+                        ctype = resp.headers.get("content-type", "")
+                        if ctype.startswith("image/") and resp.content:
+                            return io.BytesIO(resp.content), url
+                except Exception:
+                    pass
+            return None, str(url or "")
+
+        # 插入图片
+        cursor_top = right_top
+        for img in image_items[:2]:  # 控制数量，避免过度拥挤
+            pic_src, hint = _resolve_image_source(img)
+            title = img.get("title") or "图片"
+            caption = img.get("caption") or hint
+            try:
+                if pic_src is None:
+                    # 回退为文本提示
+                    if len(slide.placeholders) > 1:
+                        tf = slide.placeholders[1].text_frame
+                        p = tf.add_paragraph()
+                        p.text = f"• {title}: {caption}"
+                        p.font.size = Pt(18)
+                        p.level = 0
+                else:
+                    pic = slide.shapes.add_picture(pic_src, right_left, cursor_top, width=int(right_w))
+                    cursor_top = min(cursor_top + pic.height + Inches(0.2), int(slide_h - block_h))
+            except Exception as e:
+                logger.warning(f"Failed to add image to slide: {e}")
+
+        # 插入表格
+        for tbl in table_items[:1]:  # 每页最多一个表格
+            headers = tbl.get("headers") or []
+            rows = tbl.get("rows") or []
+            try:
+                cols = max(len(headers), max((len(r) for r in rows), default=0))
+                rows_count = len(rows) + (1 if headers else 0)
+                if cols > 0 and rows_count > 0:
+                    table_shape = slide.shapes.add_table(rows_count, cols, right_left, cursor_top, right_w, block_h)
+                    table = table_shape.table
+                    # 头部
+                    r_idx = 0
+                    if headers:
+                        for c, val in enumerate(headers[:cols]):
+                            cell = table.cell(0, c)
+                            cell.text = str(val)
+                            cell.text_frame.paragraphs[0].font.bold = True
+                        r_idx = 1
+                    # 数据
+                    for r in rows[: rows_count - r_idx]:
+                        for c in range(cols):
+                            val = r[c] if c < len(r) else ""
+                            cell = table.cell(r_idx, c)
+                            cell.text = str(val)
+                        r_idx += 1
+            except Exception as e:
+                logger.warning(f"Failed to add table to slide: {e}")
 
     def _create_end_slide(self, slide_data: Dict[str, Any]):
         """创建结束页"""
