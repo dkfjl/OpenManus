@@ -110,6 +110,22 @@ class KnowledgeBaseSettings(BaseModel):
     )
 
 
+class AIPPTSettings(BaseModel):
+    """Configuration for AIPPT third-party API"""
+    base_url: str = Field(
+        "http://192.168.1.119:3001", description="AIPPT API base URL"
+    )
+    request_timeout: int = Field(
+        300, description="Request timeout in seconds"
+    )
+    default_style: str = Field(
+        "通用", description="Default PPT style (通用/学术风/职场风/教育风/营销风)"
+    )
+    default_model: str = Field(
+        "gemini-3-pro-preview", description="Default AI model"
+    )
+
+
 class BrowserSettings(BaseModel):
     headless: bool = Field(False, description="Whether to run browser in headless mode")
     disable_security: bool = Field(
@@ -235,6 +251,9 @@ class AppConfig(BaseModel):
     )
     daytona_config: Optional[DaytonaSettings] = Field(
         None, description="Daytona configuration"
+    )
+    aippt_config: AIPPTSettings = Field(
+        default_factory=AIPPTSettings, description="AIPPT API configuration"
     )
     document_config: DocumentSettings = Field(
         default_factory=DocumentSettings, description="Document generation settings"
@@ -375,6 +394,11 @@ class Config:
             knowledge_base_settings = KnowledgeBaseSettings(**knowledge_base_config)
         else:
             knowledge_base_settings = KnowledgeBaseSettings()
+        aippt_config = raw_config.get("aippt")
+        if aippt_config:
+            aippt_settings = AIPPTSettings(**aippt_config)
+        else:
+            aippt_settings = AIPPTSettings()
         config_dict = {
             "llm": {
                 "default": default_settings,
@@ -389,6 +413,7 @@ class Config:
             "mcp_config": mcp_settings,
             "run_flow_config": run_flow_settings,
             "daytona_config": daytona_settings,
+            "aippt_config": aippt_settings,
             "document_config": document_settings,
             "knowledge_base_config": knowledge_base_settings,
         }
@@ -434,6 +459,11 @@ class Config:
     def knowledge_base_config(self) -> KnowledgeBaseSettings:
         """Get vector knowledge base configuration"""
         return self._config.knowledge_base_config
+
+    @property
+    def aippt_config(self) -> AIPPTSettings:
+        """Get AIPPT API configuration"""
+        return self._config.aippt_config
 
     @property
     def workspace_root(self) -> Path:

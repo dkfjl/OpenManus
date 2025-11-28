@@ -295,15 +295,15 @@ class PlanningFlow(BaseFlow):
         try:
             step_result = await executor.run(step_prompt)
 
-            # Mark the step as completed after successful execution
-            await self._mark_step_completed()
+            # Mark the step as completed after successful execution (store notes)
+            await self._mark_step_completed(notes=step_result[:1000] if step_result else "")
 
             return step_result
         except Exception as e:
             logger.error(f"Error executing step {self.current_step_index}: {e}")
             return f"Error executing step {self.current_step_index}: {str(e)}"
 
-    async def _mark_step_completed(self) -> None:
+    async def _mark_step_completed(self, notes: Optional[str] = None) -> None:
         """Mark the current step as completed."""
         if self.current_step_index is None:
             return
@@ -315,6 +315,7 @@ class PlanningFlow(BaseFlow):
                 plan_id=self.active_plan_id,
                 step_index=self.current_step_index,
                 step_status=PlanStepStatus.COMPLETED.value,
+                step_notes=notes or "",
             )
             logger.info(
                 f"Marked step {self.current_step_index} as completed in plan {self.active_plan_id}"
@@ -333,6 +334,12 @@ class PlanningFlow(BaseFlow):
                 # Update the status
                 step_statuses[self.current_step_index] = PlanStepStatus.COMPLETED.value
                 plan_data["step_statuses"] = step_statuses
+                if notes is not None:
+                    step_notes = plan_data.get("step_notes", [])
+                    while len(step_notes) <= self.current_step_index:
+                        step_notes.append("")
+                    step_notes[self.current_step_index] = notes
+                    plan_data["step_notes"] = step_notes
 
     async def _get_plan_text(self) -> str:
         """Get the current plan as formatted text."""

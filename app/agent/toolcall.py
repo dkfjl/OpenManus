@@ -40,7 +40,13 @@ class ToolCallAgent(ReActAgent):
     async def think(self) -> bool:
         """Process current state and decide next actions using tools"""
         if self.next_step_prompt:
-            user_msg = Message.user_message(self.next_step_prompt)
+            # Guard against accidental non-string (e.g., property) content
+            prompt_text = (
+                self.next_step_prompt
+                if isinstance(self.next_step_prompt, str)
+                else str(self.next_step_prompt)
+            )
+            user_msg = Message.user_message(prompt_text)
             self.messages += [user_msg]
 
         try:
