@@ -151,6 +151,7 @@ async def _process_aippt_sse_request(
         Dict with generation statistics
     """
     start_time = asyncio.get_event_loop().time()
+    slides_data = []
     slides_count = 0
 
     async with aiohttp.ClientSession() as session:
@@ -178,7 +179,7 @@ async def _process_aippt_sse_request(
                     response_data = await response.json()
                     return _handle_non_sse_response(response_data, output_path)
 
-                # Process SSE stream
+                # Process SSE stream and collect slide data
                 async for line in response.content:
                     if line:
                         line_str = line.decode('utf-8').strip()
@@ -187,13 +188,11 @@ async def _process_aippt_sse_request(
                             if data_str and data_str != '[DONE]':
                                 try:
                                     slide_data = json.loads(data_str)
+                                    slides_data.append(slide_data)
                                     slides_count += 1
                                     logger.debug(f"Received slide {slides_count}: {slide_data.get('type', 'unknown')}")
                                 except json.JSONDecodeError:
                                     logger.warning(f"Failed to parse SSE data: {data_str}")
-
-                # For SSE responses, we assume the PPTX is generated and saved by the API
-                # or we need to handle binary data differently based on the actual API behavior
 
         except asyncio.TimeoutError:
             raise TimeoutError(f"AIPPT API request timed out after {timeout} seconds")
@@ -202,12 +201,29 @@ async def _process_aippt_sse_request(
 
     generation_time = asyncio.get_event_loop().time() - start_time
 
-    # Note: The actual PPTX file handling depends on how the AIPPT API returns the file
-    # This might need adjustment based on the actual API behavior
-    return {
-        "slides_count": slides_count,
-        "generation_time": generation_time,
-    }
+    # Convert collected slide data to PPTX using our new service
+    if slides_data:
+        try:
+            from app.services.aippt_to_pptx_service import \
+                convert_aippt_slides_to_pptx
+
+            logger.info(f"Converting {len(slides_data)} slides to PPTX using local service")
+            conversion_result = convert_aippt_slides_to_pptx(slides_data, output_path)
+
+            if conversion_result["status"] == "success":
+                return {
+                    "slides_count": conversion_result["slides_processed"],
+                    "generation_time": generation_time,
+                    "file_size": conversion_result["file_size"],
+                }
+            else:
+                raise Exception(f"PPTX conversion failed: {conversion_result.get('error', 'Unknown error')}")
+
+        except Exception as e:
+            logger.error(f"Failed to convert slides to PPTX: {e}")
+            raise Exception(f"Local PPTX generation failed: {str(e)}")
+    else:
+        raise Exception("No slide data received from AIPPT API")
 
 
 def _handle_non_sse_response(response_data: dict, output_path: str) -> dict:
@@ -248,10 +264,27 @@ def _handle_non_sse_response(response_data: dict, output_path: str) -> dict:
             raise Exception(f"Failed to save base64 file data: {str(e)}")
 
     elif "slides" in response_data:
-        # Handle slides data (might need to generate PPTX locally)
-        logger.info(f"Received {len(response_data['slides'])} slides data")
-        # TODO: Implement local PPTX generation from slides data
-        return {"slides_count": len(response_data["slides"])}
+        # Handle slides data (generate PPTX locally using our service)
+        slides_data = response_data["slides"]
+        logger.info(f"Received {len(slides_data)} slides data, converting to PPTX locally")
+
+        try:
+            from app.services.aippt_to_pptx_service import \
+                convert_aippt_slides_to_pptx
+
+            conversion_result = convert_aippt_slides_to_pptx(slides_data, output_path)
+
+            if conversion_result["status"] == "success":
+                return {
+                    "slides_count": conversion_result["slides_processed"],
+                    "file_size": conversion_result["file_size"]
+                }
+            else:
+                raise Exception(f"PPTX conversion failed: {conversion_result.get('error', 'Unknown error')}")
+
+        except Exception as e:
+            logger.error(f"Failed to convert slides to PPTX: {e}")
+            raise Exception(f"Local PPTX generation failed: {str(e)}")
 
     else:
         # Just status information

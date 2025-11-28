@@ -111,3 +111,10 @@ server_reference = "app.mcp.server" # default server module reference
 # Your can add additional agents into run-flow workflow to solve different-type tasks.
 [runflow]
 use_data_analysis_agent = false     # The Data Analysi Agent to solve various data analysis tasks
+
+# AIPPT configuration for PPT generation
+[aippt]
+base_url = "http://192.168.1.119:3001"  # AIPPT API base URL
+request_timeout = 300                      # Request timeout in seconds
+default_style = "通用"                      # Default PPT style (通用/学术风/职场风/教育风/营销风)
+default_model = "gemini-3-pro-preview"     # Default AI model
