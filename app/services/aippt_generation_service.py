@@ -6,11 +6,11 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import aiohttp
-
 from app.config import config
 from app.logger import logger
 from app.services.execution_log_service import log_execution_event
+from app.llm import LLM
+from app.schema import Message
 
 
 def _sanitize_filename(topic: str) -> str:
@@ -34,14 +34,14 @@ async def generate_pptx_from_aippt(
     filepath: Optional[str] = None,
 ) -> dict:
     """
-    Generate PPTX file using the AIPPT third-party API.
+    Generate a PPTX file locally using LLM from an AIPPT-style outline.
 
     Args:
         topic: The main topic for the PPT
         outline: PPT outline in AIPPT JSON format
         language: Output language (zh, en, etc.)
         style: PPT style (通用, 学术风, 职场风, 教育风, 营销风)
-        model: AI model to use (e.g., "gemini-3-pro-preview")
+        model: Kept for API-compatibility; ignored in local generation
         filepath: Optional custom filepath for saving the PPTX
 
     Returns:
@@ -75,27 +75,14 @@ async def generate_pptx_from_aippt(
     )
 
     try:
-        # Get AIPPT API configuration
-        aippt_config = config.aippt_config
-        base_url = aippt_config.base_url
-        api_endpoint = f"{base_url}/tools/aippt"
-        timeout = aippt_config.request_timeout
-
-        # Prepare request payload
-        outline_json = json.dumps(outline, ensure_ascii=False)
-        payload = {
-            "content": outline_json,
-            "language": language,
-            "style": style,
-            "model": model,
-        }
-
-        # Make HTTP request with SSE processing
-        result = await _process_aippt_sse_request(
-            api_endpoint=api_endpoint,
-            payload=payload,
+        # Local LLM generation (no third-party API)
+        result = await _generate_pptx_locally(
+            topic=topic,
+            outline=outline,
+            language=language,
+            style=style,
+            model=model,
             output_path=abs_path,
-            timeout=timeout,
         )
 
         log_execution_event(
@@ -122,7 +109,7 @@ async def generate_pptx_from_aippt(
             "AIPPT PPTX generation failed",
             {"error": str(e)},
         )
-        logger.error(f"Failed to generate PPTX via AIPPT: {e}")
+        logger.error(f"Failed to generate PPTX (local): {e}")
 
         return {
             "status": "failed",
@@ -132,172 +119,170 @@ async def generate_pptx_from_aippt(
         }
 
 
-async def _process_aippt_sse_request(
-    api_endpoint: str,
-    payload: dict,
-    output_path: str,
-    timeout: int = 300,
-) -> dict:
+
+
+# ------------------ Local generation path (no third-party API) ------------------
+
+def _language_instruction(lang: Optional[str]) -> str:
+    if not lang:
+        return "请用中文"
+    v = (lang or "").lower()
+    if v in ("zh", "zh-cn", "cn", "中文"):
+        return "请用中文"
+    if v in ("en", "en-us", "english"):
+        return "Please respond in English"
+    if v in ("ja", "jp", "日本語"):
+        return "日本語で答えてください"
+    return "请用中文"
+
+
+def _style_label(style: Optional[str]) -> str:
+    if not style:
+        return "通用风格"
+    m = {
+        "通用": "通用风格",
+        "学术风": "学术风格",
+        "职场风": "职场商务风格",
+        "教育风": "教育培训风格",
+        "营销风": "营销推广风格",
+    }
+    return m.get(style, "通用风格")
+
+
+def _build_local_prompt(topic: str, outline: List[dict], language: Optional[str], style: Optional[str]) -> str:
+    outline_json = json.dumps(outline, ensure_ascii=False, indent=2)
+    instr = _language_instruction(language)
+    style_text = _style_label(style)
+    prompt = (
+        f"{instr}根据以下大纲生成完整的PPT数据：\n\n"
+        f"主题：{topic}\n\n"
+        f"大纲内容：\n{outline_json}\n\n"
+        "要求：\n"
+        f"1. 风格：{style_text}\n"
+        "2. 返回流式JSON数据，每行一个完整的JSON对象\n"
+        "3. 严格按照PPTist的AIPPT类型定义格式\n"
+        "4. 每个内容项控制在合理字数内\n"
+        "5. 保持内容的连贯性和专业性\n\n"
+        "请逐个返回PPT页面数据，每个JSON对象一行。"
+    )
+    return prompt
+
+
+def _normalize_slide(slide: dict) -> dict:
+    try:
+        stype = slide.get("type")
+        data = slide.setdefault("data", {}) if isinstance(slide.get("data"), dict) else slide.setdefault("data", {})
+        if stype == "cover":
+            if "text" not in data and "subTitle" in data:
+                data["text"] = data.get("subTitle")
+        elif stype == "contents":
+            items = data.get("items", [])
+            if isinstance(items, list):
+                norm = []
+                for it in items:
+                    if isinstance(it, dict) and "title" in it:
+                        norm.append(str(it.get("title")))
+                    else:
+                        norm.append(it if isinstance(it, str) else str(it))
+                data["items"] = norm
+    except Exception:
+        pass
+    return slide
+
+
+def _parse_ndjson_or_objects(raw_text: str) -> List[dict]:
+    """Parse NDJSON-like output where each line is a JSON object.
+
+    - Skips code fences like ``` or ```json
+    - Tries line-by-line JSON first; if none parsed, falls back to regex-style brace scanning for multiple objects.
     """
-    Process AIPPT SSE request and save generated PPTX.
+    slides: List[dict] = []
+    if not raw_text:
+        return slides
 
-    Args:
-        api_endpoint: Full AIPPT API endpoint URL
-        payload: Request payload
-        output_path: Path to save the generated PPTX
-        timeout: Request timeout in seconds
-
-    Returns:
-        Dict with generation statistics
-    """
-    start_time = asyncio.get_event_loop().time()
-    slides_data = []
-    slides_count = 0
-
-    async with aiohttp.ClientSession() as session:
+    # First pass: per-line JSON
+    for line in raw_text.splitlines():
+        ln = line.strip()
+        if not ln or ln.startswith("```"):
+            continue
         try:
-            async with session.post(
-                api_endpoint,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=timeout),
-                headers={"Content-Type": "application/json"},
-            ) as response:
+            obj = json.loads(ln)
+            if isinstance(obj, dict):
+                slides.append(_normalize_slide(obj))
+        except json.JSONDecodeError:
+            continue
 
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise aiohttp.ClientResponseError(
-                        request_info=response.request_info,
-                        history=response.history,
-                        status=response.status,
-                        message=f"AIPPT API error: {error_text}",
-                    )
+    if slides:
+        return slides
 
-                # Process SSE stream
-                content_type = response.headers.get('content-type', '')
-                if 'text/event-stream' not in content_type:
-                    # Handle non-SSE response (might be direct JSON)
-                    response_data = await response.json()
-                    return _handle_non_sse_response(response_data, output_path)
+    # Fallback: extract multiple JSON objects from a big blob
+    # Simple brace matching to slice objects; robust enough for typical outputs
+    buf = []
+    depth = 0
+    in_str = False
+    esc = False
+    for ch in raw_text:
+        buf.append(ch)
+        if ch == "\\" and not esc:
+            esc = True
+            continue
+        if ch == '"' and not esc:
+            in_str = not in_str
+        if not in_str:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    chunk = "".join(buf).strip()
+                    buf = []
+                    try:
+                        obj = json.loads(chunk)
+                        if isinstance(obj, dict):
+                            slides.append(_normalize_slide(obj))
+                    except Exception:
+                        pass
+        if esc:
+            esc = False
 
-                # Process SSE stream and collect slide data
-                async for line in response.content:
-                    if line:
-                        line_str = line.decode('utf-8').strip()
-                        if line_str.startswith('data: '):
-                            data_str = line_str[6:]  # Remove 'data: ' prefix
-                            if data_str and data_str != '[DONE]':
-                                try:
-                                    slide_data = json.loads(data_str)
-                                    slides_data.append(slide_data)
-                                    slides_count += 1
-                                    logger.debug(f"Received slide {slides_count}: {slide_data.get('type', 'unknown')}")
-                                except json.JSONDecodeError:
-                                    logger.warning(f"Failed to parse SSE data: {data_str}")
+    return slides
 
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"AIPPT API request timed out after {timeout} seconds")
-        except aiohttp.ClientError as e:
-            raise Exception(f"AIPPT API request failed: {str(e)}")
 
+async def _generate_pptx_locally(
+    *,
+    topic: str,
+    outline: List[dict],
+    language: Optional[str],
+    style: Optional[str],
+    model: Optional[str],
+    output_path: str,
+) -> dict:
+    start_time = asyncio.get_event_loop().time()
+
+    # Build prompt per the third-party server logic
+    prompt = _build_local_prompt(topic, outline, language, style)
+
+    # Use the same LLM configuration and call pattern as Step 1 (outline)
+    # No extra model/profile selection for local generation
+    llm = LLM()
+
+    # Non-stream call to get complete content then slice into NDJSON lines
+    response_text = await llm.ask([Message.user_message(prompt)], stream=False, temperature=0.2)
+    slides_data = _parse_ndjson_or_objects(response_text)
+
+    if not slides_data:
+        raise Exception("Local LLM did not return any slide data")
+
+    # Convert to PPTX using existing local service
+    from app.services.aippt_to_pptx_service import convert_aippt_slides_to_pptx
+
+    conversion = convert_aippt_slides_to_pptx(slides_data, output_path)
     generation_time = asyncio.get_event_loop().time() - start_time
 
-    # Convert collected slide data to PPTX using our new service
-    if slides_data:
-        try:
-            from app.services.aippt_to_pptx_service import \
-                convert_aippt_slides_to_pptx
-
-            logger.info(f"Converting {len(slides_data)} slides to PPTX using local service")
-            conversion_result = convert_aippt_slides_to_pptx(slides_data, output_path)
-
-            if conversion_result["status"] == "success":
-                return {
-                    "slides_count": conversion_result["slides_processed"],
-                    "generation_time": generation_time,
-                    "file_size": conversion_result["file_size"],
-                }
-            else:
-                raise Exception(f"PPTX conversion failed: {conversion_result.get('error', 'Unknown error')}")
-
-        except Exception as e:
-            logger.error(f"Failed to convert slides to PPTX: {e}")
-            raise Exception(f"Local PPTX generation failed: {str(e)}")
-    else:
-        raise Exception("No slide data received from AIPPT API")
-
-
-def _handle_non_sse_response(response_data: dict, output_path: str) -> dict:
-    """
-    Handle non-SSE response from AIPPT API.
-
-    Args:
-        response_data: JSON response from API
-        output_path: Path where PPTX should be saved
-
-    Returns:
-        Dict with generation statistics
-    """
-    # This function needs to be implemented based on actual API response format
-    # The API might return:
-    # 1. A file download URL
-    # 2. Base64 encoded PPTX data
-    # 3. Direct binary data
-    # 4. Just status information
-
-    if "file_url" in response_data:
-        # Handle file download URL
-        # This would require an additional request to download the file
-        logger.info(f"File URL provided: {response_data['file_url']}")
-        # TODO: Implement file download logic
-        return {"slides_count": response_data.get("slides_count", 0)}
-
-    elif "file_data" in response_data:
-        # Handle base64 encoded file data
-        import base64
-        try:
-            file_data = base64.b64decode(response_data["file_data"])
-            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, 'wb') as f:
-                f.write(file_data)
-            return {"slides_count": response_data.get("slides_count", 0)}
-        except Exception as e:
-            raise Exception(f"Failed to save base64 file data: {str(e)}")
-
-    elif "slides" in response_data:
-        # Handle slides data (generate PPTX locally using our service)
-        slides_data = response_data["slides"]
-        logger.info(f"Received {len(slides_data)} slides data, converting to PPTX locally")
-
-        try:
-            from app.services.aippt_to_pptx_service import \
-                convert_aippt_slides_to_pptx
-
-            conversion_result = convert_aippt_slides_to_pptx(slides_data, output_path)
-
-            if conversion_result["status"] == "success":
-                return {
-                    "slides_count": conversion_result["slides_processed"],
-                    "file_size": conversion_result["file_size"]
-                }
-            else:
-                raise Exception(f"PPTX conversion failed: {conversion_result.get('error', 'Unknown error')}")
-
-        except Exception as e:
-            logger.error(f"Failed to convert slides to PPTX: {e}")
-            raise Exception(f"Local PPTX generation failed: {str(e)}")
-
-    else:
-        # Just status information
-        return {"slides_count": response_data.get("slides_count", 0)}
-
-
-class AIPPTConfig:
-    """AIPPT API configuration"""
-
-    def __init__(
-        self,
-        base_url: str = "http://192.168.1.119:3001",
-        request_timeout: int = 300,
-    ):
-        self.base_url = base_url.rstrip('/')
-        self.request_timeout = request_timeout
+    if conversion.get("status") == "success":
+        return {
+            "slides_count": conversion["slides_processed"],
+            "generation_time": generation_time,
+            "file_size": conversion["file_size"],
+        }
+    raise Exception(f"PPTX conversion failed: {conversion.get('error', 'Unknown error')}")

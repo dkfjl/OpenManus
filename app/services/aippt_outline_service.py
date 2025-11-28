@@ -5,8 +5,8 @@ import re
 from typing import Dict, List, Optional
 
 from app.llm import LLM
-from app.schema import Message
 from app.logger import logger
+from app.schema import Message
 from app.services.execution_log_service import log_execution_event
 
 
@@ -60,7 +60,7 @@ async def generate_aippt_outline(
 要求：
 1. 返回标准的JSON格式，符合PPTist的AIPPT类型定义
 2. 包含封面页、目录页、过渡页、内容页、结束页
-3. 每个内容页包含2-4个要点
+3. 每个内容页包含2-4个要点，每个要点不少于100字，并在恰当的地方引用案例说明
 4. 内容要有逻辑性和层次性
 
 PPT页面类型定义：

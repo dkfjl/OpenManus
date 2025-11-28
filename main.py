@@ -338,7 +338,7 @@ async def generate_report_endpoint(
                     pass
 
         if format.lower() == "pptx":
-            # New behavior: generate PPTX using AIPPT API
+            # New behavior: generate PPTX locally (no third-party API)
             from app.config import config
             from app.services.aippt_generation_service import \
                 generate_pptx_from_aippt
@@ -358,7 +358,7 @@ async def generate_report_endpoint(
                     detail=f"PPT outline generation failed: {outline_result.get('error', 'Unknown error')}"
                 )
 
-            # Step 2: Generate PPTX using AIPPT API
+            # Step 2: Generate PPTX locally using the outline
             result = await generate_pptx_from_aippt(
                 topic=topic.strip(),
                 outline=outline_result["outline"],

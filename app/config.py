@@ -124,6 +124,13 @@ class AIPPTSettings(BaseModel):
     default_model: str = Field(
         "gemini-3-pro-preview", description="Default AI model"
     )
+    # Local generation options
+    use_local_service: bool = Field(
+        False, description="Generate slides via local LLM instead of third-party API"
+    )
+    local_model_name: Optional[str] = Field(
+        None, description="Optional LLM profile name for local generation"
+    )
 
 
 class BrowserSettings(BaseModel):
