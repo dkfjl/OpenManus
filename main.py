@@ -342,14 +342,35 @@ async def generate_report_endpoint(
                     language=language or "zh",
                     reference_content=parsed_content or None,
                 )
-                final_outline = enrich_res.get("outline") or outline_result["outline"]
+                # Step 2.5: Media enrichment (images & tables) after text enrichment
+                from app.services.aippt_media_enrichment_service import (
+                    enrich_media_outline,
+                )
+                text_enriched_outline = (
+                    enrich_res.get("outline") or outline_result["outline"]
+                )
+                media_res = await enrich_media_outline(
+                    outline=text_enriched_outline,
+                    topic=topic.strip(),
+                    language=language or "zh",
+                )
+                final_outline = media_res.get("outline") or text_enriched_outline
                 log_execution_event(
                     "aippt_enrich",
-                    "Outline content enrichment finished",
-                    {"status": enrich_res.get("status"), "updated": enrich_res.get("updated", 0)},
+                    "Outline enrichment finished (text + media)",
+                    {
+                        "text_status": enrich_res.get("status"),
+                        "text_updated": enrich_res.get("updated", 0),
+                        "media_images": media_res.get("images_added", 0),
+                        "media_tables": media_res.get("tables_added", 0),
+                    },
                 )
             except Exception as _e:
-                final_outline = outline_result["outline"]
+                # Preserve text-enriched outline if available; only skip media enrichment
+                try:
+                    final_outline = text_enriched_outline
+                except Exception:
+                    final_outline = outline_result["outline"]
 
             # Step 3: Generate PPTX; use direct_convert to preserve enriched content
             result = await generate_pptx_from_aippt(

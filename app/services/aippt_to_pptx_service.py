@@ -35,10 +35,10 @@ class AIPPTToPPTXService:
         },
         # 品牌：皇家深蓝（Royal & Navy Blue）
         "皇家深蓝": {
-            "primary": RGBColor(39, 69, 240),      # Royal Blue #2745F0
-            "background": RGBColor(234, 240, 255), # 淡蓝背景 #EAF0FF，保证可读性
-            "text": RGBColor(0, 0, 0),             # 文本黑色，增强对比
-            "accent": RGBColor(10, 26, 47),        # Navy Blue #0A1A2F
+            "primary": RGBColor(39, 69, 240),  # Royal Blue #2745F0
+            "background": RGBColor(234, 240, 255),  # 淡蓝背景 #EAF0FF，保证可读性
+            "text": RGBColor(0, 0, 0),  # 文本黑色，增强对比
+            "accent": RGBColor(10, 26, 47),  # Navy Blue #0A1A2F
         },
         "学术风": {
             "primary": RGBColor(128, 0, 0),  # 主色调：深红
@@ -118,6 +118,8 @@ class AIPPTToPPTXService:
         self.style = style
         self.colors = self._get_style_colors(style)
         self.layouts = self._get_style_layouts(style)
+        # 记录每个 transition 下 content 的序号（用于三种版式轮换）
+        self._section_variant_seq = 0
 
     def create_presentation(self) -> Presentation:
         """创建新的演示文稿"""
@@ -194,11 +196,15 @@ class AIPPTToPPTXService:
 
     def _lighten(self, c: RGBColor, delta: int) -> RGBColor:
         r, g, b = self._rgb_tuple(c)
-        return RGBColor(self._clamp(r + delta), self._clamp(g + delta), self._clamp(b + delta))
+        return RGBColor(
+            self._clamp(r + delta), self._clamp(g + delta), self._clamp(b + delta)
+        )
 
     def _darken(self, c: RGBColor, delta: int) -> RGBColor:
         r, g, b = self._rgb_tuple(c)
-        return RGBColor(self._clamp(r - delta), self._clamp(g - delta), self._clamp(b - delta))
+        return RGBColor(
+            self._clamp(r - delta), self._clamp(g - delta), self._clamp(b - delta)
+        )
 
     def _mix(self, a: RGBColor, b: RGBColor, ratio: float = 0.5) -> RGBColor:
         ratio = max(0.0, min(1.0, ratio))
@@ -226,24 +232,38 @@ class AIPPTToPPTXService:
         style = self.style or "通用"
         try:
             # 品牌：皇家深蓝（支持中英文别名）
-            if style in ("皇家深蓝", "RoyalNavy", "Royal & Navy", "Royal Navy", "RoyalNavyBlue"):
+            if style in (
+                "皇家深蓝",
+                "RoyalNavy",
+                "Royal & Navy",
+                "Royal Navy",
+                "RoyalNavyBlue",
+            ):
                 # 使过渡页更具高级感且保证可读性：
                 # 起始色：将 Navy 与背景按 0.25 混合，略微变浅；
                 # 结束色：将 Royal 与背景按 0.55 混合后再浅化；
                 start = self._lighten(self._mix(accent, background, 0.25), 10)
                 end = self._lighten(self._mix(primary, background, 0.55), 10)
                 # 方向采用 135° 对角，使与封面/结束（vertical）区分
-                self._set_gradient_background(slide, start, end, direction="diagonal_rev")
+                self._set_gradient_background(
+                    slide, start, end, direction="diagonal_rev"
+                )
             elif style == "学术风":
                 end = self._lighten(primary, 40)
-                self._set_gradient_background(slide, accent, end, direction="horizontal")
+                self._set_gradient_background(
+                    slide, accent, end, direction="horizontal"
+                )
             elif style == "职场风":
                 end = self._lighten(primary, 50)
-                self._set_gradient_background(slide, accent, end, direction="diagonal_rev")
+                self._set_gradient_background(
+                    slide, accent, end, direction="diagonal_rev"
+                )
             elif style == "教育风":
                 end = self._mix(primary, background, 0.35)
                 end = self._lighten(end, 20)
-                self._set_gradient_background(slide, accent, end, direction="horizontal")
+                self._set_gradient_background(
+                    slide, accent, end, direction="horizontal"
+                )
             elif style == "营销风":
                 end = self._lighten(primary, 80)
                 self._set_gradient_background(slide, accent, end, direction="diagonal")
@@ -251,7 +271,9 @@ class AIPPTToPPTXService:
                 end = self._lighten(primary, 60)
                 self._set_gradient_background(slide, accent, end, direction="diagonal")
         except Exception as e:
-            logger.warning(f"Failed to apply transition gradient for style {style}: {e}")
+            logger.warning(
+                f"Failed to apply transition gradient for style {style}: {e}"
+            )
             # 回退到默认通用方案
             end = self._lighten(primary, 60)
             self._set_gradient_background(slide, accent, end, direction="diagonal")
@@ -315,6 +337,15 @@ class AIPPTToPPTXService:
         except Exception:
             pass
 
+    # 统一设置字体名称（按候选依次尝试）
+    def _set_font_name(self, font, candidates: list[str]):
+        for name in candidates:
+            try:
+                font.name = name
+                return
+            except Exception:
+                continue
+
     def _disable_bullets_paragraph(self, paragraph) -> None:
         """显式关闭段落项目符号，避免模板默认 bullets。"""
         try:
@@ -322,11 +353,17 @@ class AIPPTToPPTXService:
             # 清理已有 bullet 相关子元素
             for ch in list(pPr):
                 t = ch.tag
-                if t.endswith('buNone') or t.endswith('buChar') or t.endswith('buAutoNum') or t.endswith('buBlip'):
+                if (
+                    t.endswith("buNone")
+                    or t.endswith("buChar")
+                    or t.endswith("buAutoNum")
+                    or t.endswith("buBlip")
+                ):
                     pPr.remove(ch)
             # 声明无项目符号
             from pptx.oxml.xmlchemy import OxmlElement
-            pPr.append(OxmlElement('a:buNone'))
+
+            pPr.append(OxmlElement("a:buNone"))
         except Exception:
             pass
 
@@ -470,7 +507,12 @@ class AIPPTToPPTXService:
         if slide.shapes.title:
             slide.shapes.title.text = title
             try:
-                slide.shapes.title.text_frame.paragraphs[0].font.color.rgb = self.colors["primary"]
+                ph = slide.shapes.title.text_frame.paragraphs[0]
+                ph.font.color.rgb = self.colors["primary"]
+                ph.font.size = Pt(32)
+                ph.font.bold = True
+                # 标题字体优先序（中文环境）
+                ph.font.name = "PingFang SC Semibold"
             except Exception:
                 pass
 
@@ -506,28 +548,38 @@ class AIPPTToPPTXService:
         title = data.get("title", "章节")
         text = data.get("text", "")
 
-        # 设置标题（并整体上移标题位置）
+        # 设置标题（整体下移，增强层次）
         title_shape = None
         if slide.shapes.title:
             title_shape = slide.shapes.title
             title_shape.text = title
             title_paragraph = title_shape.text_frame.paragraphs[0]
-            title_paragraph.font.size = Pt(40)
+            title_paragraph.font.size = Pt(42)
             title_paragraph.font.bold = True
             try:
                 title_paragraph.font.color.rgb = self.colors["primary"]
             except Exception:
                 pass
-            # 上移标题，使内容区可上移更多
+            # 下移标题，使其更靠近视觉中心
             try:
                 slide_w = self.prs.slide_width
                 slide_h = self.prs.slide_height
                 margin = Inches(0.8)
                 title_shape.left = margin
                 title_shape.width = slide_w - Inches(1.6)
-                desired_title_top = int(slide_h * 0.16)  # 标题顶部约 16%
-                if title_shape.top > desired_title_top:
-                    title_shape.top = desired_title_top
+                desired_title_top = int(slide_h * 0.24)  # 标题顶部约 24%
+                title_shape.top = desired_title_top
+                # 更高级中文字体（候选顺序）
+                self._set_font_name(
+                    title_paragraph.font,
+                    [
+                        "Source Han Sans SC Bold",
+                        "PingFang SC Semibold",
+                        "Microsoft YaHei UI",
+                        "Noto Sans CJK SC",
+                        "Microsoft YaHei",
+                    ],
+                )
             except Exception:
                 pass
 
@@ -554,47 +606,25 @@ class AIPPTToPPTXService:
 
         wrote_text = False
         try:
-            # 在标题下方创建文本框，保证视觉顺序为：标题 → 概述/要点
-            # 并整体上移（约 30%~50%）：将内容块顶部锚定在距顶部 ~32% 处，且不穿过标题底部
+            # 在标题下方创建文本框，视觉顺序：标题 → 要点
             slide_w = self.prs.slide_width
             slide_h = self.prs.slide_height
             margin = Inches(0.8)
-            # 调低整体内容块位置：从 32% 下移到 ~44%
-            # 让标题与要点之间留出更大留白，避免“内容整体偏高”的观感
-            desired_top_ratio = 0.44
             if title_shape is not None:
-                tshape = title_shape
                 left = margin
-                base_top = tshape.top + tshape.height + Inches(0.2)
                 width = slide_w - Inches(1.6)
-                # 计算期望 top，并确保不与标题重叠
-                desired_top = int(slide_h * desired_top_ratio)
-                min_top_after_title = tshape.top + tshape.height + Inches(0.05)
-                top = max(desired_top, min_top_after_title)
+                # 重新计算安全间距：标题底部 + 0.4英寸（约1cm）安全间距
+                top = title_shape.top + title_shape.height + Inches(0.8)
             else:
                 left = margin
                 width = slide_w - Inches(1.6)
-                top = int(slide_h * desired_top_ratio)
-                top = max(top, Inches(1.2))
-            height = max(Inches(1.0), slide_h - top - Inches(0.8))
+                top = int(slide_h * 0.34)
+            height = max(Inches(1.0), slide_h - top - Inches(0.9))
 
             tb = slide.shapes.add_textbox(left, top, width, height)
             tf = tb.text_frame
             tf.clear()
             para_idx = 0
-            if text:
-                p = tf.paragraphs[0]
-                p.text = str(text)
-                try:
-                    p.font.size = Pt(20)
-                except Exception:
-                    pass
-                self._disable_bullets_paragraph(p)
-                try:
-                    p.font.color.rgb = self.colors["text"]
-                except Exception:
-                    pass
-                para_idx += 1
             for idx, it in enumerate(items, start=1):
                 t = it.get("title") if isinstance(it, dict) else str(it)
                 if not t:
@@ -602,14 +632,23 @@ class AIPPTToPPTXService:
                 p = tf.add_paragraph() if para_idx > 0 else tf.paragraphs[0]
                 p.text = f"{idx}. {t}"
                 try:
-                    p.font.size = Pt(18)
+                    p.font.size = Pt(20)
+                    p.line_spacing = 1.18
+                    p.space_after = Pt(2)
+                    p.font.color.rgb = self.colors["text"]
+                    self._set_font_name(
+                        p.font,
+                        [
+                            "Source Han Sans SC",
+                            "PingFang SC",
+                            "Microsoft YaHei UI",
+                            "Noto Sans CJK SC",
+                            "Microsoft YaHei",
+                        ],
+                    )
                 except Exception:
                     pass
                 self._disable_bullets_paragraph(p)
-                try:
-                    p.font.color.rgb = self.colors["text"]
-                except Exception:
-                    pass
                 para_idx += 1
             wrote_text = para_idx > 0
         except Exception:
@@ -624,7 +663,10 @@ class AIPPTToPPTXService:
                 bar_width = slide_w - Inches(1.2)
                 bar_height = Inches(0.25)
                 from pptx.enum.shapes import MSO_SHAPE
-                deco = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, bar_left, bar_top, bar_width, bar_height)
+
+                deco = slide.shapes.add_shape(
+                    MSO_SHAPE.RECTANGLE, bar_left, bar_top, bar_width, bar_height
+                )
                 deco.fill.solid()
                 deco.fill.fore_color.rgb = self.colors["accent"]
                 try:
@@ -633,6 +675,12 @@ class AIPPTToPPTXService:
                     pass
             except Exception:
                 pass
+
+        # 每到一个 transition，重置内容版式轮换计数
+        try:
+            self._section_variant_seq = 0
+        except Exception:
+            pass
 
     def _create_content_slide(self, slide_data: Dict[str, Any]):
         """创建内容页"""
@@ -648,7 +696,20 @@ class AIPPTToPPTXService:
         if slide.shapes.title:
             slide.shapes.title.text = title
             try:
-                slide.shapes.title.text_frame.paragraphs[0].font.color.rgb = self.colors["primary"]
+                ph = slide.shapes.title.text_frame.paragraphs[0]
+                ph.font.color.rgb = self.colors["primary"]
+                ph.font.size = Pt(32)
+                ph.font.bold = True
+                self._set_font_name(
+                    ph.font,
+                    [
+                        "Source Han Sans SC Bold",
+                        "PingFang SC Semibold",
+                        "Microsoft YaHei UI",
+                        "Noto Sans CJK SC",
+                        "Microsoft YaHei",
+                    ],
+                )
             except Exception:
                 pass
 
@@ -665,6 +726,26 @@ class AIPPTToPPTXService:
             else:
                 text_items.append(it)
 
+        # 为 content 轮换三种版式（每个 transition 重置序列）
+        try:
+            variant = int(getattr(self, "_section_variant_seq", 0)) % 3
+            self._section_variant_seq = (
+                int(getattr(self, "_section_variant_seq", 0)) + 1
+            )
+        except Exception:
+            variant = 0
+
+        slide_w = self.prs.slide_width
+        slide_h = self.prs.slide_height
+        margin = Inches(0.5)
+        # 调整列宽比例：左侧文本区65%，右侧媒体区35%
+        text_left_left = margin
+        text_left_w = int(slide_w * 0.65) - margin
+        right_left = int(slide_w * 0.65)
+        right_top = int(slide_h * 0.24)
+        right_w = slide_w - right_left - margin
+        block_h = int(slide_h * 0.5)
+
         # 文本要点写入内容占位（统一样式：字号一致、左对齐、无缩进、自动换行）
         if len(slide.placeholders) > 1:
             content_shape = slide.placeholders[1]
@@ -678,7 +759,38 @@ class AIPPTToPPTXService:
             except Exception:
                 pass
 
-            def _style_paragraph(p, size_pt=20):
+            # 根据版式变更文字区域与媒体区域位置
+            try:
+                if variant == 0:
+                    # 第一张：左文右图（默认）
+                    content_shape.left = text_left_left
+                    content_shape.top = int(slide_h * 0.26)
+                    content_shape.width = text_left_w
+                    content_shape.height = slide_h - content_shape.top - Inches(1.0)
+                elif variant == 1:
+                    # 第二张：右文左图（镜像布局），与第一张区分
+                    left_media_w = int(slide_w * 0.30)  # 左侧媒体区30%
+                    right_text_left = left_media_w + Inches(0.8)
+                    content_shape.left = right_text_left
+                    content_shape.top = int(slide_h * 0.24)
+                    content_shape.width = slide_w - right_text_left - margin
+                    content_shape.height = slide_h - content_shape.top - Inches(1.0)
+                    # 更新媒体区到左侧
+                    right_left = margin
+                    right_w = left_media_w - margin
+                else:  # variant == 2
+                    # 第三张：竖直排版，占据左半区；右半留白（不放媒体）
+                    content_shape.left = text_left_left
+                    content_shape.top = int(slide_h * 0.22)
+                    content_shape.width = int(slide_w * 0.7) - margin
+                    content_shape.height = slide_h - content_shape.top - Inches(1.0)
+                    # 禁用媒体区
+                    right_w = 0
+                    right_left = slide_w
+            except Exception:
+                pass
+
+            def _style_paragraph(p, size_pt=18):  # 减小字体到18pt
                 try:
                     p.level = 0
                 except Exception:
@@ -690,6 +802,18 @@ class AIPPTToPPTXService:
                 try:
                     p.font.size = Pt(size_pt)
                     p.font.color.rgb = self.colors["text"]
+                    p.line_spacing = 1.2
+                    p.space_after = Pt(2)
+                    self._set_font_name(
+                        p.font,
+                        [
+                            "Source Han Sans SC",
+                            "PingFang SC",
+                            "Microsoft YaHei UI",
+                            "Noto Sans CJK SC",
+                            "Microsoft YaHei",
+                        ],
+                    )
                 except Exception:
                     pass
                 self._disable_bullets_paragraph(p)
@@ -713,22 +837,15 @@ class AIPPTToPPTXService:
                     p.text = item_title
                 else:
                     p.text = item_text
-                _style_paragraph(p, size_pt=20)
+                _style_paragraph(p, size_pt=18)  # 使用18pt字体
 
                 # 第二段：案例 case（与正文同字号、同样式；自动换行）
                 if item_case:
                     p2 = tf.add_paragraph()
                     p2.text = item_case
-                    _style_paragraph(p2, size_pt=20)
+                    _style_paragraph(p2, size_pt=18)  # 使用18pt字体
 
-        # 计算右侧区域用于放置图片/表格
-        slide_w = self.prs.slide_width
-        slide_h = self.prs.slide_height
-        margin = Inches(0.5)
-        right_left = int(slide_w * 0.55)
-        right_top = int(slide_h * 0.25)
-        right_w = slide_w - right_left - margin
-        block_h = int(slide_h * 0.5)
+        # 根据 variant 计算右侧区域用于放置图片/表格（参数已在上方初始化/调整）
 
         # 帮助函数：解析图片源
         def _resolve_image_source(
@@ -762,9 +879,9 @@ class AIPPTToPPTXService:
                     pass
             return None, str(url or "")
 
-        # 插入图片
+        # 插入图片（variant==2 留白，不插入媒体）
         cursor_top = right_top
-        for img in image_items[:2]:  # 控制数量，避免过度拥挤
+        for img in image_items[:2] if right_w > 0 else []:  # 控制数量，避免过度拥挤
             pic_src, hint = _resolve_image_source(img)
             title = img.get("title") or "图片"
             caption = img.get("caption") or hint
@@ -793,8 +910,8 @@ class AIPPTToPPTXService:
             except Exception as e:
                 logger.warning(f"Failed to add image to slide: {e}")
 
-        # 插入表格
-        for tbl in table_items[:1]:  # 每页最多一个表格
+        # 插入表格（variant==2 留白，不插入媒体）
+        for tbl in table_items[:1] if right_w > 0 else []:  # 每页最多一个表格
             headers = tbl.get("headers") or []
             rows = tbl.get("rows") or []
             try:
@@ -829,7 +946,9 @@ class AIPPTToPPTXService:
                             cell = table.cell(r_idx, c)
                             cell.text = str(val)
                             try:
-                                cell.text_frame.paragraphs[0].font.color.rgb = self.colors["text"]
+                                cell.text_frame.paragraphs[0].font.color.rgb = (
+                                    self.colors["text"]
+                                )
                             except Exception:
                                 pass
                         r_idx += 1
