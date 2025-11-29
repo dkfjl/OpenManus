@@ -66,7 +66,7 @@ async def generate_aippt_outline(
 要求：
 1. 返回标准的JSON格式，符合PPTist的AIPPT类型定义
 2. 包含封面页、目录页、过渡页、内容页、结束页
-3. 每个内容页包含3个要点，每个要点不少于50字，并在恰当的地方引用案例说明
+3. 每个内容页包含3个要点，每个要点不超过50字，并任意找一个点引用案例说明
 4. 内容要有逻辑性和层次性
 5. 目录中的每一条目都必须在目录页之后依次对应两张页面：先 transition(标题=该目录条目)，再 content(标题建议与目录条目一致或更具体)；保证目录条目数量与随后 (transition+content) 组数完全一致；输出顺序严格为 cover → contents → (transition+content)* → end。
 
