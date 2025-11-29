@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Dict, List, Optional
 from copy import deepcopy
+from typing import Dict, List, Optional
 from urllib.parse import urljoin
 
 import requests
@@ -24,6 +24,7 @@ def _sanitize_filename(topic: str) -> str:
 def _default_reports_path(topic: str) -> str:
     """Generate default file path for PPTX"""
     from pathlib import Path
+
     return str(Path("reports") / _sanitize_filename(topic))
 
 
@@ -65,7 +66,7 @@ async def generate_aippt_outline(
 要求：
 1. 返回标准的JSON格式，符合PPTist的AIPPT类型定义
 2. 包含封面页、目录页、过渡页、内容页、结束页
-3. 每个内容页包含2-4个要点，每个要点不少于100字，并在恰当的地方引用案例说明
+3. 每个内容页包含3个要点，每个要点不少于50字，并在恰当的地方引用案例说明
 4. 内容要有逻辑性和层次性
 5. 目录中的每一条目都必须在目录页之后依次对应两张页面：先 transition(标题=该目录条目)，再 content(标题建议与目录条目一致或更具体)；保证目录条目数量与随后 (transition+content) 组数完全一致；输出顺序严格为 cover → contents → (transition+content)* → end。
 
@@ -118,16 +119,6 @@ PPT页面类型定义：
 
 请生成完整的PPT大纲JSON数组，包含所有页面类型。"""
 
-    # Optional extension: instruct how to represent images and tables inside content slides
-    prompt_template += (
-        "\n扩展说明（可选）：\n"
-        "- 若需要在内容页展示图片，请在 data.items 中加入 {\"type\": \"image\", \"title\": \"图片标题\", \"caption\": \"可选说明\", \"url\": \"图片URL\" 或 \"path\": \"本地路径\" 或 \"base64\": \"数据\"}。\n"
-        "- 若需要在内容页展示表格，请在 data.items 中加入 {\"type\": \"table\", \"title\": \"表格标题\", \"headers\": [..], \"rows\": [[..],[..]]}。\n"
-        "- 仍需保持整体结构为 [cover, contents, (transition+content)*, end]。\n"
-    )
-
-    
-
     # Add reference content if provided
     if reference_content and reference_content.strip():
         prompt_template += f"\n\n参考材料：\n{reference_content[:2000]}"
@@ -140,14 +131,15 @@ PPT页面类型定义：
         if web_tables:
             # include up to 2 small tables json in prompt
             import json as _json
+
             tables_json = _json.dumps(web_tables[:2], ensure_ascii=False)
             prompt_template += "\n\n参考网页表格JSON（节选）：\n" + tables_json
         if web_images:
-            prompt_template += "\n\n参考图片URL（节选）：\n- " + "\n- ".join(web_images[:5])
+            prompt_template += "\n\n参考图片URL（节选）：\n- " + "\n- ".join(
+                web_images[:5]
+            )
     except Exception:
         pass
-
-    
 
     try:
         # Initialize LLM client
@@ -228,7 +220,7 @@ PPT页面类型定义：
 def _extract_json_from_response(response: str) -> List[dict]:
     """Extract JSON array from LLM response"""
     # Try to find JSON array in the response
-    json_match = re.search(r'\[.*\]', response, re.DOTALL)
+    json_match = re.search(r"\[.*\]", response, re.DOTALL)
 
     if json_match:
         json_str = json_match.group(0)
@@ -296,26 +288,13 @@ def _validate_outline(outline: List[dict], topic: str) -> List[dict]:
 
     # Add missing required slides
     if not has_cover:
-        validated.insert(0, {
-            "type": "cover",
-            "data": {
-                "title": topic,
-                "text": ""
-            }
-        })
+        validated.insert(0, {"type": "cover", "data": {"title": topic, "text": ""}})
 
     if not has_contents:
-        validated.insert(1, {
-            "type": "contents",
-            "data": {
-                "items": ["目录"]
-            }
-        })
+        validated.insert(1, {"type": "contents", "data": {"items": ["目录"]}})
 
     if not has_end:
-        validated.append({
-            "type": "end"
-        })
+        validated.append({"type": "end"})
 
     return validated
 
@@ -368,14 +347,13 @@ def _enforce_toc_alignment(outline: List[dict], topic: str) -> List[dict]:
         new_outline.append(contents)
 
     # Reuse existing content slides in order where possible
-    remaining_contents = [s for s in other_slides if isinstance(s, dict) and s.get("type") == "content"]
+    remaining_contents = [
+        s for s in other_slides if isinstance(s, dict) and s.get("type") == "content"
+    ]
 
     for item in toc_items:
         # transition
-        new_outline.append({
-            "type": "transition",
-            "data": {"title": item, "text": ""}
-        })
+        new_outline.append({"type": "transition", "data": {"title": item, "text": ""}})
         # content
         if remaining_contents:
             c = remaining_contents.pop(0)
@@ -388,10 +366,9 @@ def _enforce_toc_alignment(outline: List[dict], topic: str) -> List[dict]:
                 pass
             new_outline.append(c)
         else:
-            new_outline.append({
-                "type": "content",
-                "data": {"title": item, "items": []}
-            })
+            new_outline.append(
+                {"type": "content", "data": {"title": item, "items": []}}
+            )
 
     if end_slide is None:
         end_slide = {"type": "end"}
@@ -404,70 +381,39 @@ def _create_fallback_outline(topic: str, language: str) -> List[dict]:
     """Create a basic fallback outline when generation fails"""
     if language == "zh":
         return [
-            {
-                "type": "cover",
-                "data": {
-                    "title": topic,
-                    "text": "自动生成的演示文稿"
-                }
-            },
-            {
-                "type": "contents",
-                "data": {
-                    "items": ["概述", "主要内容", "总结"]
-                }
-            },
+            {"type": "cover", "data": {"title": topic, "text": "自动生成的演示文稿"}},
+            {"type": "contents", "data": {"items": ["概述", "主要内容", "总结"]}},
             {
                 "type": "content",
                 "data": {
                     "title": "概述",
                     "items": [
-                        {
-                            "title": "背景介绍",
-                            "text": "相关背景信息"
-                        },
-                        {
-                            "title": "目标说明",
-                            "text": "本次演示的目标"
-                        }
-                    ]
-                }
+                        {"title": "背景介绍", "text": "相关背景信息"},
+                        {"title": "目标说明", "text": "本次演示的目标"},
+                    ],
+                },
             },
             {
                 "type": "content",
                 "data": {
                     "title": "主要内容",
                     "items": [
-                        {
-                            "title": "核心要点",
-                            "text": "主要内容和分析"
-                        },
-                        {
-                            "title": "详细说明",
-                            "text": "进一步的解释和说明"
-                        }
-                    ]
-                }
+                        {"title": "核心要点", "text": "主要内容和分析"},
+                        {"title": "详细说明", "text": "进一步的解释和说明"},
+                    ],
+                },
             },
             {
                 "type": "content",
                 "data": {
                     "title": "总结",
                     "items": [
-                        {
-                            "title": "要点回顾",
-                            "text": "主要内容的总结"
-                        },
-                        {
-                            "title": "展望",
-                            "text": "未来的发展方向"
-                        }
-                    ]
-                }
+                        {"title": "要点回顾", "text": "主要内容的总结"},
+                        {"title": "展望", "text": "未来的发展方向"},
+                    ],
+                },
             },
-            {
-                "type": "end"
-            }
+            {"type": "end"},
         ]
 
 
@@ -512,7 +458,10 @@ def _auto_gather_web_assets(topic: str, max_pages: int = 2):
                 if not src:
                     continue
                 absu = urljoin(res.url, src)
-                if any(absu.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+                if any(
+                    absu.lower().endswith(ext)
+                    for ext in [".jpg", ".jpeg", ".png", ".webp"]
+                ):
                     images.append(absu)
                 if len(images) >= 8:
                     break
@@ -521,15 +470,21 @@ def _auto_gather_web_assets(topic: str, max_pages: int = 2):
                 headers_row = []
                 first_tr = tb.find("tr")
                 if tb.find_all("th"):
-                    headers_row = [th.get_text(strip=True)[:50] for th in tb.find_all("th")]
+                    headers_row = [
+                        th.get_text(strip=True)[:50] for th in tb.find_all("th")
+                    ]
                 elif first_tr:
-                    headers_row = [td.get_text(strip=True)[:50] for td in first_tr.find_all("td")]
+                    headers_row = [
+                        td.get_text(strip=True)[:50] for td in first_tr.find_all("td")
+                    ]
                 rows = []
                 trs = tb.find_all("tr")
                 # skip first row if used for headers
                 start_idx = 1 if headers_row and len(trs) > 1 else 0
                 for tr in trs[start_idx : start_idx + 5]:
-                    row = [td.get_text(strip=True)[:80] for td in tr.find_all(["td", "th"])]
+                    row = [
+                        td.get_text(strip=True)[:80] for td in tr.find_all(["td", "th"])
+                    ]
                     if any(cell for cell in row):
                         rows.append(row)
                 if headers_row or rows:
@@ -538,7 +493,9 @@ def _auto_gather_web_assets(topic: str, max_pages: int = 2):
                         if soup.title and soup.title.string
                         else res.title
                     )
-                    tables.append({"title": title, "headers": headers_row, "rows": rows})
+                    tables.append(
+                        {"title": title, "headers": headers_row, "rows": rows}
+                    )
         except Exception:
             continue
 
@@ -554,4 +511,3 @@ def _auto_gather_web_assets(topic: str, max_pages: int = 2):
 
     text_snippet = ("\n\n".join(texts))[:1200]
     return text_snippet, tables, uniq_images
-        
