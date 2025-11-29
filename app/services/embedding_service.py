@@ -3,7 +3,12 @@ import math
 from typing import List, Sequence
 
 from openai import AsyncAzureOpenAI, AsyncOpenAI, OpenAIError
-from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_fixed
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_fixed,
+)
 
 from app.config import EmbeddingSettings, config
 from app.logger import logger
@@ -75,12 +80,17 @@ class EmbeddingService:
                         model=self.settings.model or self._llm_settings.model,
                         input=list(batch),
                     )
-                    vectors = [self._normalize(data.embedding) for data in response.data]
-                    logger.debug("Embedded %d texts via %s", len(batch), self.settings.model)
+                    vectors = [
+                        self._normalize(data.embedding) for data in response.data
+                    ]
+                    logger.debug(
+                        "Embedded {} texts via {}", len(batch), self.settings.model
+                    )
                     return vectors
 
     def _normalize(self, vector: Sequence[float]) -> List[float]:
         if not self.settings.normalize:
             return [float(v) for v in vector]
         norm = math.sqrt(sum(float(x) ** 2 for x in vector)) or 1.0
+        return [float(x) / norm for x in vector]
         return [float(x) / norm for x in vector]

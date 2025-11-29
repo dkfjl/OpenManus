@@ -62,43 +62,46 @@ async def generate_aippt_outline(
     # Build the prompt template
     language_instruction = "请用中文" if language == "zh" else "Please use English"
 
-    prompt_template = f"""{language_instruction}为"{topic}"生成PPT大纲。
-要求：
-1. 返回标准的JSON格式，符合PPTist的AIPPT类型定义
-2. 包含封面页、目录页、过渡页、内容页、结束页
-3. 每个内容页包含3个要点，每个要点不超过50字，并任意找一个点引用案例说明
-4. 内容要有逻辑性和层次性
-5. 目录中的每一条目都必须在目录页之后依次对应两张页面：先 transition(标题=该目录条目)，再 content(标题建议与目录条目一致或更具体)；保证目录条目数量与随后 (transition+content) 组数完全一致；输出顺序严格为 cover → contents → (transition+content)* → end。
+    prompt_template = f"""任务：为主题 "{topic}" 生成 PPT 大纲，输出 **唯一且完整的 JSON 对象**，严格遵守下面的结构和约束。不要输出任何多余文本、注释或代码块 —— 仅返回 JSON。
 
-PPT页面类型定义：
+输出格式（必须）：
+{{
+  "status": "ok" | "error",
+  "slides": [ ... ],            // 当 status=="ok" 时为页面数组
+  "meta": {{ "topic": "...", "language": "zh" }}
+  // 当 status=="error" 时，返回 {{ "status":"error", "reason":"解释原因", "partial": {{... 可选}} }}
+}}
 
-1. 封面页 (cover):
+页面类型（slides 中元素）只允许下列 type 值并符合相应 data 结构：
+
+1) cover:
 {{
   "type": "cover",
   "data": {{
-    "title": "PPT标题",
-    "text": "副标题或描述"
+    "title": "PPT 标题",
+    "text": "副标题或简短描述（<= 50 字）"
   }}
 }}
 
-2. 目录页 (contents):
+2) contents:   // 目录页，items 数组长度必须为 4 或 5
 {{
   "type": "contents",
   "data": {{
-    "items": ["目录项1", "目录项2", "目录项3"]
+    "items": ["章节1 标题", "章节2 标题", "..."]
   }}
 }}
 
-3. 过渡页 (transition):
+3) transition:
 {{
   "type": "transition",
   "data": {{
     "title": "章节标题",
-    "text": "章节描述"
+    "items": ["要点1 标题", "要点2 标题", "要点3 标题"],  // 恰好 3 个
+    "text": "一句 20~60 字的串联总结（不超过 80 字）"
   }}
 }}
 
-4. 内容页 (content):
+4) content:  // 每个 content 的 items 数量必须为 1
 {{
   "type": "content",
   "data": {{
@@ -106,18 +109,38 @@ PPT页面类型定义：
     "items": [
       {{
         "title": "要点标题",
-        "text": "要点详细说明"
+        "text": "要点说明（<= 100 字）",
+        "case": "案例说明（建议 80~150 字；如果整套幻灯片页数 > 12，则把案例缩短到 <= 80 字）"
       }}
     ]
   }}
 }}
 
-5. 结束页 (end):
-{{
-  "type": "end"
-}}
+5) end:
+{{ "type": "end", "data": {{}} }}
 
-请生成完整的PPT大纲JSON数组，包含所有页面类型。"""
+关键约束（Machine-check，必须满足）：
+- slides 数组必须按顺序： cover → contents → (transition + N * content)+ → end
+  - 其中每个 contents.items 中的章节数（4或5）与后续 transition 的数量一致；
+  - 对于每个 transition，其后应至少跟随 1 个 content（通常 3 个 content 对应 transition.items 的 3 要点）；但总体上，每个目录项应对应一组 transition + 至少 1 content。
+- contents.items 的长度必须是 4 或 5（严格）。
+- 每个 transition.items 必须有且恰好 3 个要点字符串。
+- 每个 content.data.items 必须恰好包含 1 个对象，包含 title、text、case 三个字段。
+- 所有 text/case 字段长度限制请遵守上面说明。
+- 若任何约束无法满足，请返回 {{"status":"error","reason":"...","partial": <可选已生成内容>}} 并停止。
+
+语言说明：
+- 输出语言请使用 "{language}"（只影响页面文本），不要混用语言。
+
+参考资料：
+- 若有参考材料，请只采纳关键信息并融入章节标题或要点，切勿逐字复制。若输入参考材料无法在约束下全部使用，则优先保留与主题最相关的要点。
+
+注意：
+- 只返回 JSON；不要包含额外解释或示例。
+- 尽量使每个页面简洁、适合幻灯片展示（句子短、要点清晰）。
+
+现在请生成满足上述约束的完整 JSON 并把 topic/参考材料整合进去。
+"""
 
     # Add reference content if provided
     if reference_content and reference_content.strip():
@@ -218,27 +241,39 @@ PPT页面类型定义：
 
 
 def _extract_json_from_response(response: str) -> List[dict]:
-    """Extract JSON array from LLM response"""
-    # Try to find JSON array in the response
-    json_match = re.search(r"\[.*\]", response, re.DOTALL)
+    """Extract slides array from LLM response.
 
-    if json_match:
-        json_str = json_match.group(0)
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse JSON from match: {e}")
-            raise ValueError("Invalid JSON format in LLM response")
-
-    # Try to parse the entire response as JSON
+    Supports two shapes:
+    - legacy: a JSON array of slide objects
+    - new: {"status":"ok","slides":[...],"meta":{...}} or {"status":"error",...}
+    """
+    text = response.strip()
+    # First try full JSON parse
     try:
-        parsed = json.loads(response.strip())
+        parsed = json.loads(text)
         if isinstance(parsed, list):
             return parsed
-        else:
-            raise ValueError("Response is not a JSON array")
-    except json.JSONDecodeError:
-        raise ValueError("No valid JSON found in LLM response")
+        if isinstance(parsed, dict):
+            status = str(parsed.get("status", "")).lower()
+            if status == "ok" and isinstance(parsed.get("slides"), list):
+                return list(parsed.get("slides") or [])
+            if status == "error":
+                reason = parsed.get("reason") or "LLM returned error"
+                raise ValueError(f"Outline generation error: {reason}")
+            # Some models may wrap slides under a different root without status
+            if isinstance(parsed.get("slides"), list):
+                return list(parsed.get("slides") or [])
+    except Exception:
+        pass
+
+    # Fallback: find a top-level array in the text
+    m = re.search(r"\[.*\]", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            pass
+    raise ValueError("No valid slides JSON found in LLM response")
 
 
 def _validate_outline(outline: List[dict], topic: str) -> List[dict]:
@@ -274,6 +309,13 @@ def _validate_outline(outline: List[dict], topic: str) -> List[dict]:
                 slide["data"] = {}
             if "items" not in slide["data"]:
                 slide["data"]["items"] = ["目录"]
+            # Clamp TOC items to at most 5（严格上限，提示要求 4-5）
+            try:
+                items = slide["data"].get("items") or []
+                if isinstance(items, list) and len(items) > 5:
+                    slide["data"]["items"] = items[:5]
+            except Exception:
+                pass
         elif slide_type == "end":
             has_end = True
             # End slide doesn't need data
@@ -283,6 +325,25 @@ def _validate_outline(outline: List[dict], topic: str) -> List[dict]:
                 slide["data"] = {}
             if slide_type == "content" and "items" not in slide["data"]:
                 slide["data"]["items"] = []
+            # New spec: content.items MUST be exactly 1 (keep first if multiple)
+            if slide_type == "content":
+                try:
+                    items = slide["data"].get("items") or []
+                    if isinstance(items, list):
+                        if len(items) >= 1:
+                            slide["data"]["items"] = items[:1]
+                        else:
+                            slide["data"]["items"] = []
+                except Exception:
+                    pass
+            # New spec: transition.items should be exactly 3 (truncate if longer)
+            if slide_type == "transition":
+                try:
+                    titems = slide["data"].get("items") or []
+                    if isinstance(titems, list) and len(titems) > 3:
+                        slide["data"]["items"] = titems[:3]
+                except Exception:
+                    pass
 
         validated.append(slide)
 
@@ -317,13 +378,20 @@ def _extract_toc_items(outline: List[dict]) -> List[str]:
 
 
 def _enforce_toc_alignment(outline: List[dict], topic: str) -> List[dict]:
+    """Rebuild outline to follow: cover → contents → (transition + N*content)+ → end.
+
+    - contents.items is clamped to <= 5
+    - Each transition is followed by up to 3 content slides (min 1). For each content,
+      ensure data.items has exactly 1 object. Transition.data.items is exactly 3
+      titles (pad by repeating last if fewer).
+    """
     if not outline:
         return outline
     toc_items = _extract_toc_items(outline)
     if not toc_items:
         return outline
+    toc_items = toc_items[:5]
 
-    # Keep cover, contents, collect the rest to reuse content pages if any
     cover = None
     contents = None
     end_slide = None
@@ -339,36 +407,58 @@ def _enforce_toc_alignment(outline: List[dict], topic: str) -> List[dict]:
         else:
             other_slides.append(s)
 
-    # Rebuild sequence: cover → contents → (transition+content)* → end
     new_outline: List[dict] = []
     if cover:
         new_outline.append(cover)
     if contents:
+        try:
+            cdata = contents.setdefault("data", {})
+            cdata["items"] = toc_items
+        except Exception:
+            pass
         new_outline.append(contents)
 
-    # Reuse existing content slides in order where possible
+    # All content slides to reuse
     remaining_contents = [
         s for s in other_slides if isinstance(s, dict) and s.get("type") == "content"
     ]
 
-    for item in toc_items:
-        # transition
-        new_outline.append({"type": "transition", "data": {"title": item, "text": ""}})
-        # content
-        if remaining_contents:
-            c = remaining_contents.pop(0)
-            # If content lacks title, set it to item
+    for idx_toc, item in enumerate(toc_items, start=1):
+        # Take up to 3 content slides for this toc item
+        group: List[dict] = []
+        for _ in range(3):
+            if remaining_contents:
+                group.append(remaining_contents.pop(0))
+            else:
+                break
+        if not group:
+            group = [{"type": "content", "data": {"title": item, "items": []}}]
+
+        titles: List[str] = []
+        for j, c in enumerate(group, start=1):
             try:
                 cdata = c.setdefault("data", {})
                 if not cdata.get("title"):
                     cdata["title"] = item
+                items = cdata.get("items") or []
+                if isinstance(items, list):
+                    if len(items) >= 1:
+                        cdata["items"] = items[:1]
+                    else:
+                        cdata["items"] = [{"title": f"{item} - 要点{j}", "text": "", "case": ""}]
+                it = cdata["items"][0]
+                t = (it.get("title") or "").strip() if isinstance(it, dict) else str(it)
+                titles.append(t or f"要点{j}")
             except Exception:
-                pass
-            new_outline.append(c)
-        else:
-            new_outline.append(
-                {"type": "content", "data": {"title": item, "items": []}}
-            )
+                titles.append(f"要点{j}")
+
+        # Transition with exactly 3 titles
+        if len(titles) < 3:
+            titles = titles + [titles[-1]] * (3 - len(titles)) if titles else ["要点1", "要点2", "要点3"]
+        titles = titles[:3]
+        t_text = "；".join(titles)
+        new_outline.append({"type": "transition", "data": {"title": item, "items": titles, "text": t_text}})
+        new_outline.extend(group)
 
     if end_slide is None:
         end_slide = {"type": "end"}
@@ -378,43 +468,25 @@ def _enforce_toc_alignment(outline: List[dict], topic: str) -> List[dict]:
 
 
 def _create_fallback_outline(topic: str, language: str) -> List[dict]:
-    """Create a basic fallback outline when generation fails"""
+    """Create a basic fallback outline when generation fails (conforms to new spec)."""
     if language == "zh":
-        return [
-            {"type": "cover", "data": {"title": topic, "text": "自动生成的演示文稿"}},
-            {"type": "contents", "data": {"items": ["概述", "主要内容", "总结"]}},
-            {
-                "type": "content",
-                "data": {
-                    "title": "概述",
-                    "items": [
-                        {"title": "背景介绍", "text": "相关背景信息"},
-                        {"title": "目标说明", "text": "本次演示的目标"},
-                    ],
-                },
-            },
-            {
-                "type": "content",
-                "data": {
-                    "title": "主要内容",
-                    "items": [
-                        {"title": "核心要点", "text": "主要内容和分析"},
-                        {"title": "详细说明", "text": "进一步的解释和说明"},
-                    ],
-                },
-            },
-            {
-                "type": "content",
-                "data": {
-                    "title": "总结",
-                    "items": [
-                        {"title": "要点回顾", "text": "主要内容的总结"},
-                        {"title": "展望", "text": "未来的发展方向"},
-                    ],
-                },
-            },
-            {"type": "end"},
-        ]
+        toc = ["概述", "主体", "扩展", "总结"]
+        slides: List[dict] = []
+        slides.append({"type": "cover", "data": {"title": topic, "text": "自动生成的演示文稿"}})
+        slides.append({"type": "contents", "data": {"items": toc[:5]}})
+        for sec in toc[:5]:
+            t_items = ["要点1", "要点2", "要点3"]
+            slides.append({"type": "transition", "data": {"title": sec, "items": t_items, "text": "；".join(t_items)}})
+            for k in range(3):
+                slides.append({
+                    "type": "content",
+                    "data": {
+                        "title": sec,
+                        "items": [{"title": t_items[k], "text": "简要说明", "case": ""}],
+                    },
+                })
+        slides.append({"type": "end", "data": {}})
+        return slides
 
 
 def _auto_gather_web_assets(topic: str, max_pages: int = 2):

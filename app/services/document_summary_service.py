@@ -41,13 +41,14 @@ class DocumentSummaryService:
             temperature=0.2,
         )
         result = summary.strip()
-        logger.info("Generated upload summary (%d chars)", len(result))
+        logger.info("Generated upload summary ({} chars)", len(result))
         return result
 
     def _trim(self, text: str) -> str:
         if len(text) <= self.max_chars:
             return text
         logger.warning(
-            "Upload content exceeds %d chars; truncating for summarization", self.max_chars
+            "Upload content exceeds {} chars; truncating for summarization",
+            self.max_chars,
         )
         return text[: self.max_chars]

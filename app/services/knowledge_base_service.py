@@ -70,13 +70,17 @@ class KnowledgeBaseService:
         embedding_service: EmbeddingService | None = None,
     ):
         self.settings = settings or config.knowledge_base_config
-        self.embedding_service = embedding_service or EmbeddingService(self.settings.embedding)
+        self.embedding_service = embedding_service or EmbeddingService(
+            self.settings.embedding
+        )
         self._chunker = TextChunker(
             chunk_size=self.settings.chunk_size,
             chunk_overlap=self.settings.chunk_overlap,
         )
         self._lock = asyncio.Lock()
-        self._storage_dir = (config.workspace_root / self.settings.storage_dir).resolve()
+        self._storage_dir = (
+            config.workspace_root / self.settings.storage_dir
+        ).resolve()
         self._storage_dir.mkdir(parents=True, exist_ok=True)
         self._metadata_path = self._storage_dir / "records.json"
         self._index: faiss.IndexFlatIP | None = None
@@ -189,12 +193,14 @@ class KnowledgeBaseService:
     async def delete_source(self, source_id: str) -> int:
         async with self._lock:
             before = len(self._records)
-            self._records = [record for record in self._records if record.source_id != source_id]
+            self._records = [
+                record for record in self._records if record.source_id != source_id
+            ]
             removed = before - len(self._records)
             if removed:
                 self._rebuild_index()
                 self._persist_records()
-                logger.info("Removed %d chunks for source %s", removed, source_id)
+                logger.info("Removed {} chunks for source {}", removed, source_id)
             return removed
 
     def _build_records(
@@ -226,7 +232,9 @@ class KnowledgeBaseService:
             self._dimension = array.shape[1]
             self._index = faiss.IndexFlatIP(self._dimension)
             if self._records:
-                existing = np.array([rec.vector for rec in self._records], dtype="float32")
+                existing = np.array(
+                    [rec.vector for rec in self._records], dtype="float32"
+                )
                 if existing.size:
                     self._index.add(existing)
         elif array.shape[1] != self._dimension:
@@ -251,7 +259,7 @@ class KnowledgeBaseService:
         self._records = [KnowledgeRecord(**item) for item in payload]
         if self._records:
             self._rebuild_index()
-            logger.info("Loaded %d knowledge base chunks", len(self._records))
+            logger.info("Loaded {} knowledge base chunks", len(self._records))
 
     def _persist_records(self) -> None:
         tmp_path = self._metadata_path.with_suffix(".tmp")

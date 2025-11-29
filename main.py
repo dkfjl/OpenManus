@@ -344,6 +344,8 @@ async def generate_report_endpoint(
                 generate_pptx_from_aippt
             from app.services.aippt_outline_service import \
                 generate_aippt_outline
+            from app.services.aippt_content_enrichment_service import \
+                enrich_aippt_content
 
             # Step 1: Generate PPT outline
             outline_result = await generate_aippt_outline(
@@ -358,14 +360,32 @@ async def generate_report_endpoint(
                     detail=f"PPT outline generation failed: {outline_result.get('error', 'Unknown error')}"
                 )
 
-            # Step 2: Generate PPTX locally using the outline
+            # Step 2: Enrich content (text/case) via dedicated LLM pass
+            try:
+                enrich_res = await enrich_aippt_content(
+                    outline=outline_result["outline"],
+                    topic=topic.strip(),
+                    language=language or "zh",
+                    reference_content=parsed_content or None,
+                )
+                final_outline = enrich_res.get("outline") or outline_result["outline"]
+                log_execution_event(
+                    "aippt_enrich",
+                    "Outline content enrichment finished",
+                    {"status": enrich_res.get("status"), "updated": enrich_res.get("updated", 0)},
+                )
+            except Exception as _e:
+                final_outline = outline_result["outline"]
+
+            # Step 3: Generate PPTX; use direct_convert to preserve enriched content
             result = await generate_pptx_from_aippt(
                 topic=topic.strip(),
-                outline=outline_result["outline"],
+                outline=final_outline,
                 language=language,
                 style=style or config.aippt_config.default_style,
                 model=model or config.aippt_config.default_model,
                 filepath=filepath,
+                direct_convert=True,
             )
         else:
             # default to docx path to preserve backward compat

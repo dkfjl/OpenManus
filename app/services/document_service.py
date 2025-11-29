@@ -12,9 +12,11 @@ from app.config import config
 from app.llm import LLM
 from app.logger import logger
 from app.schema import Message
-from app.services.execution_log_service import (attach_execution_log,
-                                                end_execution_log,
-                                                log_execution_event)
+from app.services.execution_log_service import (
+    attach_execution_log,
+    end_execution_log,
+    log_execution_event,
+)
 from app.tool.word_document import WordDocumentTool
 
 
@@ -100,7 +102,7 @@ class DocumentGenerator:
             raise ValueError(f"未找到任务 {task_id}")
 
         if metadata.get("status") == "completed":
-            logger.info("Task %s already completed", task_id)
+            logger.info("Task {} already completed", task_id)
             return metadata
 
         log_session = None
@@ -195,7 +197,7 @@ class DocumentGenerator:
 
             metadata["status"] = "completed"
             self._save_metadata(metadata)
-            logger.info("Structured document task %s completed", task_id)
+            logger.info("Structured document task {} completed", task_id)
             if reference_sources:
                 await self._write_reference_appendix(
                     doc_path=doc_path,
@@ -259,11 +261,11 @@ class DocumentGenerator:
             f"需要 4~{sections_target} 个主要章节，每章必须包含一句话总结，并提供 EXACT 3 个关键要点。"
             "每个关键要点要具体可执行，长度控制在15~25字，并使用 'subtopics' 数组给出。"
             "请严格按照以下 JSON 结构输出：\n"
-            '{'
+            "{"
             '"title": "报告标题",'
             '"sections": ['
             '{"heading": "章节名称", "summary": "一句话定位", "subtopics": ["要点1","要点2"]}'
-            ']'
+            "]"
             "}"
         )
 
@@ -278,7 +280,9 @@ class DocumentGenerator:
         sections_raw = plan_dict.get("sections") or []
         sections = [
             OutlineSection(
-                heading=section.get("heading") or section.get("title") or f"部分 {idx+1}",
+                heading=section.get("heading")
+                or section.get("title")
+                or f"部分 {idx+1}",
                 summary=section.get("summary") or section.get("description") or "",
                 subtopics=section.get("subtopics")
                 or section.get("bullets")
@@ -318,7 +322,9 @@ class DocumentGenerator:
     def _ensure_section_subtopics(self, plan: DocumentPlan):
         fallback_points = ["背景与现状", "挑战与机遇", "策略与行动"]
         for section in plan.sections:
-            subtopics = [sub.strip() for sub in (section.subtopics or []) if sub and sub.strip()]
+            subtopics = [
+                sub.strip() for sub in (section.subtopics or []) if sub and sub.strip()
+            ]
             if len(subtopics) < 3:
                 subtopics.extend(fallback_points[len(subtopics) : 3])
             elif len(subtopics) > 3:
@@ -335,7 +341,11 @@ class DocumentGenerator:
         reference_material: str = "",
     ) -> str:
         min_words = self.settings.min_section_words
-        key_points_sequence = section.subtopics or ["背景与现状", "挑战与机遇", "策略与行动"]
+        key_points_sequence = section.subtopics or [
+            "背景与现状",
+            "挑战与机遇",
+            "策略与行动",
+        ]
         structured_brief = "\n".join(
             [f"{idx + 1}. {point}" for idx, point in enumerate(key_points_sequence)]
         )
@@ -359,9 +369,7 @@ class DocumentGenerator:
 
         # 传入完整解析文本，让模型根据当前章节挑选最合适的素材
         if reference_text:
-            user_text += (
-                "\n\n上传文档解析全文如下，请聚焦当前章节的主题摘取或概括相关事实、数据与论据：\n"
-            )
+            user_text += "\n\n上传文档解析全文如下，请聚焦当前章节的主题摘取或概括相关事实、数据与论据：\n"
             user_text += reference_text
 
         content = await self.llm.ask(
@@ -456,7 +464,9 @@ class DocumentGenerator:
     def _build_progress(self, metadata: dict) -> dict:
         sections = metadata.get("sections", [])
         total = len(sections)
-        completed = sum(1 for section in sections if section.get("status") == "completed")
+        completed = sum(
+            1 for section in sections if section.get("status") == "completed"
+        )
         next_index = metadata.get("next_section_index", completed)
         next_heading = (
             sections[next_index]["heading"] if 0 <= next_index < total else None
@@ -475,7 +485,9 @@ class DocumentGenerator:
             "status": metadata.get("status", "pending"),
             "filepath": metadata.get("filepath"),
             "title": metadata.get("title") or "",
-            "sections": [section.get("heading", "") for section in metadata.get("sections", [])],
+            "sections": [
+                section.get("heading", "") for section in metadata.get("sections", [])
+            ],
             "progress": progress,
             "execution_log_id": metadata.get("execution_log_id"),
             "reference_sources": metadata.get("reference_sources", []),
