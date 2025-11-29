@@ -15,19 +15,6 @@ from app.schema import Message
 from app.services.execution_log_service import log_execution_event
 
 
-def _sanitize_filename(topic: str) -> str:
-    """Sanitize topic for filename generation"""
-    sanitized = re.sub(r"[^\w\u4e00-\u9fff]+", "_", topic).strip("_") or "presentation"
-    return f"{sanitized}.pptx"
-
-
-def _default_reports_path(topic: str) -> str:
-    """Generate default file path for PPTX"""
-    from pathlib import Path
-
-    return str(Path("reports") / _sanitize_filename(topic))
-
-
 async def generate_aippt_outline(
     *,
     topic: str,

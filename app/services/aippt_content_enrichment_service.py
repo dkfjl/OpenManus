@@ -9,7 +9,9 @@ from app.schema import Message
 from app.services.execution_log_service import log_execution_event
 
 
-def _collect_content_indices(slides: List[dict]) -> List[Tuple[int, dict, Optional[dict]]]:
+def _collect_content_indices(
+    slides: List[dict],
+) -> List[Tuple[int, dict, Optional[dict]]]:
     """Return list of (index, content_slide, prev_transition_slide|None)."""
     out: List[Tuple[int, dict, Optional[dict]]] = []
     prev = None
@@ -19,7 +21,17 @@ def _collect_content_indices(slides: List[dict]) -> List[Tuple[int, dict, Option
             continue
         t = s.get("type")
         if t == "content":
-            out.append((i, s, prev if isinstance(prev, dict) and prev.get("type") == "transition" else None))
+            out.append(
+                (
+                    i,
+                    s,
+                    (
+                        prev
+                        if isinstance(prev, dict) and prev.get("type") == "transition"
+                        else None
+                    ),
+                )
+            )
         prev = s
     return out
 
@@ -36,12 +48,16 @@ def _build_enrich_prompt(
     items element schema:
       {"key": str, "section": str, "content_title": str, "point_title": str, "transition_points": [str]}
     """
-    lang_note = "请用中文作答" if (language or "zh").lower().startswith("zh") else "Please answer in the specified language"
+    lang_note = (
+        "请用中文作答"
+        if (language or "zh").lower().startswith("zh")
+        else "Please answer in the specified language"
+    )
     head = (
         f"{lang_note}。根据主题与上下文，为下列 content 幻灯片补充更充实的内容。\n"
         f"主题: {topic}\n"
         "每个条目的输出只返回 JSON 对象数组（不包含多余文字）。格式：\n"
-        "[{\"key\": \"...\", \"item\": {\"title\": \"...\", \"text\": \"...\", \"case\": \"...\"}}]。\n"
+        '[{"key": "...", "item": {"title": "...", "text": "...", "case": "..."}}]。\n'
         "严格要求：\n"
         "- 保持 title 不变（可微调措辞但不改变含义）。\n"
         "- text：信息密度高、语句简洁，优先包含可验证的数据/指标，中文建议 80~120 字（英文 40~80 words）。\n"
@@ -117,10 +133,17 @@ async def enrich_aippt_content(
         batch.append(
             {
                 "key": key,
-                "section": (maybe_tr.get("data", {}).get("title") if maybe_tr else cdata.get("title") or ""),
+                "section": (
+                    maybe_tr.get("data", {}).get("title")
+                    if maybe_tr
+                    else cdata.get("title") or ""
+                ),
                 "content_title": cdata.get("title") or "",
                 "point_title": _safe_first_item_title(content),
-                "transition_points": (maybe_tr.get("data", {}).get("items") if maybe_tr else []) or [],
+                "transition_points": (
+                    maybe_tr.get("data", {}).get("items") if maybe_tr else []
+                )
+                or [],
             }
         )
 
@@ -139,7 +162,9 @@ async def enrich_aippt_content(
 
     try:
         llm = LLM()
-        resp = await llm.ask([Message.user_message(prompt)], stream=False, temperature=0.5)
+        resp = await llm.ask(
+            [Message.user_message(prompt)], stream=False, temperature=0.5
+        )
         data = None
         try:
             data = json.loads(resp)
@@ -163,22 +188,26 @@ async def enrich_aippt_content(
                 continue
             item = rec["item"]
             # Normalize text/case
-            title = (item.get("title") or (content.get("data") or {}).get("title") or "").strip()
+            title = (
+                item.get("title") or (content.get("data") or {}).get("title") or ""
+            ).strip()
             text = (item.get("text") or "").strip()
             case = (item.get("case") or "").strip()
             cdata = content.setdefault("data", {})
             cdata["title"] = title or cdata.get("title") or ""
             # Ensure items exactly 1
-            cdata["items"] = [{"title": _safe_first_item_title(content), "text": text, "case": case}]
+            cdata["items"] = [
+                {"title": _safe_first_item_title(content), "text": text, "case": case}
+            ]
             updated += 1
 
         # Enforce length requirements with targeted refinement
-        # - text >= 50 chars (zh) (~ or >= 40 words for non-zh)
-        # - total(text+case) >= 200 chars (zh) (~ or >= 120 words for non-zh)
+        # - text >= 40 chars (zh) (~ or >= 32 words for non-zh)
+        # - total(text+case) >= 160 chars (zh) (~ or >= 96 words for non-zh)
         need_refine: List[Tuple[int, dict]] = []
         is_zh = (language or "zh").lower().startswith("zh")
-        min_text = 50 if is_zh else 40
-        min_total = 200 if is_zh else 120
+        min_text = 40 if is_zh else 32
+        min_total = 160 if is_zh else 96
         for idx, content, _ in pairs:
             cdata = content.get("data") or {}
             items = cdata.get("items") or []
@@ -193,25 +222,40 @@ async def enrich_aippt_content(
         async def _refine_one(idx: int, content_slide: dict):
             cdata = content_slide.get("data") or {}
             items = cdata.get("items") or []
-            it0 = items[0] if items else {"title": _safe_first_item_title(content_slide)}
-            pt = (it0.get("title") or "").strip() or _safe_first_item_title(content_slide)
+            it0 = (
+                items[0] if items else {"title": _safe_first_item_title(content_slide)}
+            )
+            pt = (it0.get("title") or "").strip() or _safe_first_item_title(
+                content_slide
+            )
             tx0 = (it0.get("text") or "").strip()
             cs0 = (it0.get("case") or "").strip()
             section = cdata.get("title") or ""
-            lang_note = "请用中文作答" if is_zh else "Please answer in the specified language"
-            req_text = f"中文不少于{min_text}字" if is_zh else f"at least {min_text} words"
-            req_total = f"中文总字数不少于{min_total}字" if is_zh else f"total at least {min_total} words"
+            lang_note = (
+                "请用中文作答" if is_zh else "Please answer in the specified language"
+            )
+            req_text = (
+                f"中文不少于{min_text}字" if is_zh else f"at least {min_text} words"
+            )
+            req_total = (
+                f"中文总字数不少于{min_total}字"
+                if is_zh
+                else f"total at least {min_total} words"
+            )
             refine_prompt = (
                 f"{lang_note}。针对下述 content 要点，补全/扩写 text 与 case。\n"
                 f"主题: {topic}\n章节: {section}\n要点标题: {pt}\n"
                 f"当前 text: {tx0 or '(空)'}\n当前 case: {cs0 or '(空)'}\n"
-                f"要求：text {req_text}，且 text+case {req_total}；给出可核查的数据或细节；返回 JSON 对象 {{\"text\":\"...\", \"case\":\"...\"}}，不要多余内容。"
+                f'要求：text {req_text}，且 text+case {req_total}；给出可核查的数据或细节；返回 JSON 对象 {{"text":"...", "case":"..."}}，不要多余内容。'
             )
-            rs = await llm.ask([Message.user_message(refine_prompt)], stream=False, temperature=0.5)
+            rs = await llm.ask(
+                [Message.user_message(refine_prompt)], stream=False, temperature=0.5
+            )
             try:
                 obj = json.loads(rs)
             except Exception:
                 import re as _re
+
                 m = _re.search(r"\{.*\}", rs, _re.DOTALL)
                 obj = json.loads(m.group(0)) if m else {}
             new_text = (obj.get("text") or tx0).strip()

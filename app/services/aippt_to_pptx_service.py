@@ -33,6 +33,13 @@ class AIPPTToPPTXService:
             "text": RGBColor(0, 0, 0),  # 文字色：黑色
             "accent": RGBColor(31, 78, 120),  # 强调色：深蓝
         },
+        # 品牌：皇家深蓝（Royal & Navy Blue）
+        "皇家深蓝": {
+            "primary": RGBColor(39, 69, 240),      # Royal Blue #2745F0
+            "background": RGBColor(234, 240, 255), # 淡蓝背景 #EAF0FF，保证可读性
+            "text": RGBColor(0, 0, 0),             # 文本黑色，增强对比
+            "accent": RGBColor(10, 26, 47),        # Navy Blue #0A1A2F
+        },
         "学术风": {
             "primary": RGBColor(128, 0, 0),  # 主色调：深红
             "background": RGBColor(248, 248, 248),  # 背景色：极浅灰
@@ -67,6 +74,13 @@ class AIPPTToPPTXService:
             "transition": 2,  # 节标题
             "content": 1,  # 标题和内容
             "end": 0,  # 标题幻灯片
+        },
+        "皇家深蓝": {
+            "cover": 0,
+            "contents": 1,
+            "transition": 2,
+            "content": 1,
+            "end": 0,
         },
         "学术风": {
             "cover": 0,  # 简洁标题页
@@ -130,19 +144,33 @@ class AIPPTToPPTXService:
             logger.warning(f"Failed to set solid background: {e}")
 
     def _set_gradient_background(
-        self, slide, color1: RGBColor, color2: RGBColor, direction: str = "vertical"
+        self,
+        slide,
+        color1: RGBColor,
+        color2: RGBColor,
+        direction: str = "vertical",  # vertical | horizontal | diagonal | diagonal_rev
     ):
-        """设置渐变背景"""
+        """设置渐变背景
+
+        direction:
+          - vertical: 自上而下
+          - horizontal: 自左而右
+          - diagonal: 左上到右下（45°）
+        """
         try:
             background = slide.background
             fill = background.fill
             fill.gradient()
 
-            # 设置渐变类型和方向
+            # 设置渐变方向
             if direction == "vertical":
-                fill.gradient_angle = 90  # 从上到下
+                fill.gradient_angle = 90
             elif direction == "horizontal":
-                fill.gradient_angle = 0  # 从左到右
+                fill.gradient_angle = 0
+            elif direction == "diagonal":
+                fill.gradient_angle = 45
+            elif direction == "diagonal_rev":
+                fill.gradient_angle = 135
             else:
                 fill.gradient_angle = 90
 
@@ -152,6 +180,81 @@ class AIPPTToPPTXService:
             gradient_stops[1].color.rgb = color2
         except Exception as e:
             logger.warning(f"Failed to set gradient background: {e}")
+
+    # ---------- 颜色辅助 ----------
+    def _rgb_tuple(self, c: RGBColor) -> tuple[int, int, int]:
+        try:
+            r, g, b = int(c[0]), int(c[1]), int(c[2])
+            return r, g, b
+        except Exception:
+            return (0, 0, 0)
+
+    def _clamp(self, v: int) -> int:
+        return 0 if v < 0 else 255 if v > 255 else v
+
+    def _lighten(self, c: RGBColor, delta: int) -> RGBColor:
+        r, g, b = self._rgb_tuple(c)
+        return RGBColor(self._clamp(r + delta), self._clamp(g + delta), self._clamp(b + delta))
+
+    def _darken(self, c: RGBColor, delta: int) -> RGBColor:
+        r, g, b = self._rgb_tuple(c)
+        return RGBColor(self._clamp(r - delta), self._clamp(g - delta), self._clamp(b - delta))
+
+    def _mix(self, a: RGBColor, b: RGBColor, ratio: float = 0.5) -> RGBColor:
+        ratio = max(0.0, min(1.0, ratio))
+        ar, ag, ab = self._rgb_tuple(a)
+        br, bg, bb = self._rgb_tuple(b)
+        mr = int(ar * (1 - ratio) + br * ratio)
+        mg = int(ag * (1 - ratio) + bg * ratio)
+        mb = int(ab * (1 - ratio) + bb * ratio)
+        return RGBColor(self._clamp(mr), self._clamp(mg), self._clamp(mb))
+
+    def _apply_transition_background(self, slide):
+        """按不同风格为过渡页设置专属渐变背景，避免与 cover/end 相同视觉。
+
+        规则：
+        - 通用：accent → 主色浅化，45° 对角渐变
+        - 学术风：accent（棕）→ 主色浅化（深红），水平渐变
+        - 职场风：accent（蓝）→ 主色浅化（深蓝），135° 对角渐变
+        - 教育风：accent（深绿）→ 背景混合主色，水平渐变
+        - 营销风：accent（亮橙）→ 主色大幅浅化，45° 对角渐变
+        """
+        primary = self.colors.get("primary")
+        background = self.colors.get("background")
+        accent = self.colors.get("accent", primary)
+
+        style = self.style or "通用"
+        try:
+            # 品牌：皇家深蓝（支持中英文别名）
+            if style in ("皇家深蓝", "RoyalNavy", "Royal & Navy", "Royal Navy", "RoyalNavyBlue"):
+                # 使过渡页更具高级感且保证可读性：
+                # 起始色：将 Navy 与背景按 0.25 混合，略微变浅；
+                # 结束色：将 Royal 与背景按 0.55 混合后再浅化；
+                start = self._lighten(self._mix(accent, background, 0.25), 10)
+                end = self._lighten(self._mix(primary, background, 0.55), 10)
+                # 方向采用 135° 对角，使与封面/结束（vertical）区分
+                self._set_gradient_background(slide, start, end, direction="diagonal_rev")
+            elif style == "学术风":
+                end = self._lighten(primary, 40)
+                self._set_gradient_background(slide, accent, end, direction="horizontal")
+            elif style == "职场风":
+                end = self._lighten(primary, 50)
+                self._set_gradient_background(slide, accent, end, direction="diagonal_rev")
+            elif style == "教育风":
+                end = self._mix(primary, background, 0.35)
+                end = self._lighten(end, 20)
+                self._set_gradient_background(slide, accent, end, direction="horizontal")
+            elif style == "营销风":
+                end = self._lighten(primary, 80)
+                self._set_gradient_background(slide, accent, end, direction="diagonal")
+            else:  # 通用 & 其他
+                end = self._lighten(primary, 60)
+                self._set_gradient_background(slide, accent, end, direction="diagonal")
+        except Exception as e:
+            logger.warning(f"Failed to apply transition gradient for style {style}: {e}")
+            # 回退到默认通用方案
+            end = self._lighten(primary, 60)
+            self._set_gradient_background(slide, accent, end, direction="diagonal")
 
     def _apply_slide_background(self, slide, slide_type: str):
         """根据幻灯片类型和风格应用背景"""
@@ -164,20 +267,9 @@ class AIPPTToPPTXService:
                 self._set_gradient_background(
                     slide, primary_color, background_color, "vertical"
                 )
-            # 过渡页使用纯色背景（主色调的浅色版）
+            # 过渡页使用与封面/结束不同的渐变背景（分风格）
             elif slide_type == "transition":
-                # 创建主色调的浅色版本：对每个通道向 255 偏移
-                try:
-                    pr, pg, pb = tuple(self.colors["primary"])  # RGBColor 是可迭代的
-                except Exception:
-                    pr, pg, pb = (0, 0, 0)
-                delta = 80
-                light_color = RGBColor(
-                    min(255, pr + delta),
-                    min(255, pg + delta),
-                    min(255, pb + delta),
-                )
-                self._set_solid_background(slide, light_color)
+                self._apply_transition_background(slide)
             # 内容页使用纯色背景
             else:
                 self._set_solid_background(slide, self.colors["background"])
@@ -467,7 +559,9 @@ class AIPPTToPPTXService:
             slide_w = self.prs.slide_width
             slide_h = self.prs.slide_height
             margin = Inches(0.8)
-            desired_top_ratio = 0.32  # 32% 顶部锚点，满足“上移 30%-50%”的诉求
+            # 调低整体内容块位置：从 32% 下移到 ~44%
+            # 让标题与要点之间留出更大留白，避免“内容整体偏高”的观感
+            desired_top_ratio = 0.44
             if title_shape is not None:
                 tshape = title_shape
                 left = margin

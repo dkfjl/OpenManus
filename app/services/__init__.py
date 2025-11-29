@@ -5,8 +5,6 @@ from .document_summary_service import DocumentSummaryService
 from .embedding_service import EmbeddingService
 from .knowledge_base_service import KnowledgeBaseService
 from .manus_runner import run_manus_flow, run_manus_flow_sync
-from .md_slide_generation_service import generate_marp_markdown_from_steps
-from .pptx_report_generation_service import generate_pptx_report_from_steps
 from .report_generation_service import generate_report_from_steps
 from .thinking_steps_service import generate_thinking_steps
 
@@ -19,8 +17,6 @@ __all__ = [
     "DocumentSummaryService",
     "EmbeddingService",
     "KnowledgeBaseService",
-    "generate_marp_markdown_from_steps",
-    "generate_pptx_report_from_steps",
     "generate_report_from_steps",
     "generate_thinking_steps",
 ]

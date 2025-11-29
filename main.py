@@ -16,10 +16,6 @@ from app.services.execution_log_service import (attach_execution_log,
                                                 end_execution_log,
                                                 log_execution_event,
                                                 start_execution_log)
-from app.services.md_slide_generation_service import \
-    generate_marp_markdown_from_steps
-from app.services.pptx_report_generation_service import \
-    generate_pptx_report_from_steps
 from app.services.report_generation_service import generate_report_from_steps
 from app.services.thinking_steps_service import generate_thinking_steps
 
@@ -86,28 +82,6 @@ class ReportResult(BaseModel):
     title: str
     agent_summary: Optional[str] = None
 
-
-class PPTLayoutPlaceholder(BaseModel):
-    idx: Optional[int]
-    type: Optional[str]
-    name: Optional[str]
-
-
-class PPTLayoutInfo(BaseModel):
-    index: int
-    name: str
-    placeholders: list[PPTLayoutPlaceholder]
-
-
-class PPTInspectResponse(BaseModel):
-    status: str
-    layouts: list[PPTLayoutInfo]
-
-
-class PPTGenerateResponse(BaseModel):
-    status: str
-    filepath: str
-    slides_written: int
 
 
 @app.on_event("startup")
