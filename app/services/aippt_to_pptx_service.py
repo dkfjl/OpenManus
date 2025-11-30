@@ -10,17 +10,19 @@ import io
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
+from PIL import Image
 from pptx import Presentation
 from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Inches, Pt
 
 from app.config import config
 from app.logger import logger
 from app.services.execution_log_service import log_execution_event
-from PIL import Image
 
 
 class AIPPTToPPTXService:
@@ -34,12 +36,12 @@ class AIPPTToPPTXService:
             "text": RGBColor(0, 0, 0),  # 文字色：黑色
             "accent": RGBColor(31, 78, 120),  # 强调色：深蓝
         },
-        # 品牌：皇家深蓝（Royal & Navy Blue）
+        # 品牌：皇家深蓝（Royal & Navy Blue）- 高级深色版
         "皇家深蓝": {
-            "primary": RGBColor(39, 69, 240),  # Royal Blue #2745F0
-            "background": RGBColor(234, 240, 255),  # 淡蓝背景 #EAF0FF，保证可读性
-            "text": RGBColor(0, 0, 0),  # 文本黑色，增强对比
-            "accent": RGBColor(10, 26, 47),  # Navy Blue #0A1A2F
+            "primary": RGBColor(255, 215, 0),  # 金色标题 (Gold)
+            "background": RGBColor(5, 20, 40),  # 深邃午夜蓝 (Midnight Blue)
+            "text": RGBColor(230, 230, 230),  # 银灰/米白正文 (Silver/Off-white)
+            "accent": RGBColor(212, 175, 55),  # 这里的 accent 也用金色或稍暗的金
         },
         "学术风": {
             "primary": RGBColor(128, 0, 0),  # 主色调：深红
@@ -240,15 +242,10 @@ class AIPPTToPPTXService:
                 "Royal Navy",
                 "RoyalNavyBlue",
             ):
-                # 使过渡页更具高级感且保证可读性：
-                # 起始色：将 Navy 与背景按 0.25 混合，略微变浅；
-                # 结束色：将 Royal 与背景按 0.55 混合后再浅化；
-                start = self._lighten(self._mix(accent, background, 0.25), 10)
-                end = self._lighten(self._mix(primary, background, 0.55), 10)
-                # 方向采用 135° 对角，使与封面/结束（vertical）区分
-                self._set_gradient_background(
-                    slide, start, end, direction="diagonal_rev"
-                )
+                # 保持深色背景，使用微弱的径向或对角渐变来突出中心
+                start = background
+                end = self._lighten(background, 15)  # 稍微亮一点的深蓝
+                self._set_gradient_background(slide, start, end, direction="diagonal")
             elif style == "学术风":
                 end = self._lighten(primary, 40)
                 self._set_gradient_background(
@@ -279,6 +276,157 @@ class AIPPTToPPTXService:
             end = self._lighten(primary, 60)
             self._set_gradient_background(slide, accent, end, direction="diagonal")
 
+    # ---------- Z-Order helpers ----------
+    def _send_shape_to_back(self, slide, shape) -> None:
+        """将形状发送到最底层，避免遮挡标题/正文。
+
+        说明：python-pptx 未公开 z-order API，这里通过操作 `_spTree` 完成。
+        在多数模板下可稳定工作，用于本项目的装饰性几何图形足够。
+        """
+        try:
+            sp = shape._element  # noqa: SLF001 - 使用私有接口以调整图层
+            tree = slide.shapes._spTree  # noqa: SLF001
+            tree.remove(sp)
+            tree.insert(0, sp)  # 放到最底层
+        except Exception:
+            # 静默失败，避免生成流程中断
+            pass
+
+    def _add_royal_decorations(self, slide, slide_type: str):
+        """
+        为“皇家深蓝”风格添加高级几何图案装饰
+        """
+        try:
+            slide_w = self.prs.slide_width
+            slide_h = self.prs.slide_height
+            gold = self.colors.get("accent")  # Gold
+            # 辅助色：半透明白/蓝
+
+            # 通用：所有页面添加极淡的角落光晕（模拟高级质感）
+            # 实际上 geometry shape 更好控制
+
+            if slide_type == "cover":
+                # 封面：右上角深蓝切角 + 左侧金色细线 + 底部梯形呼应
+
+                # 1) 右上角三角形（减小尺寸并置底，避免遮挡标题）
+                tri_w = int(slide_w * 0.45)
+                tri_h = int(slide_h * 0.85)
+                tri_l = slide_w - tri_w
+                tri_t = 0
+                shape = slide.shapes.add_shape(
+                    MSO_SHAPE.RIGHT_TRIANGLE,
+                    tri_l,
+                    tri_t,
+                    tri_w,
+                    tri_h,
+                )
+                shape.horizontal_flip = True
+                shape.vertical_flip = True
+                shape.fill.solid()
+                shape.fill.fore_color.rgb = RGBColor(10, 30, 60)
+                shape.fill.transparency = 0.45
+                try:
+                    shape.line.fill.background()
+                except Exception:
+                    pass
+                # 放到最底层，确保不覆盖标题/副标题
+                self._send_shape_to_back(slide, shape)
+
+                # 2) 左侧金色细线（与左对齐标题呼应）
+                line = slide.shapes.add_shape(
+                    MSO_SHAPE.RECTANGLE,
+                    Inches(1.0),
+                    int(slide_h * 0.3),
+                    Inches(0.05),
+                    int(slide_h * 0.25),
+                )
+                line.fill.solid()
+                line.fill.fore_color.rgb = gold
+                try:
+                    line.line.fill.background()
+                except Exception:
+                    pass
+
+                # 3) 底部梯形（贴合底边并适度出血，亦置底）
+                trap_h = int(slide_h * 0.22)
+                trap_w = int(slide_w * 0.45)
+                trap_l = -Inches(0.6)
+                trap_t = slide_h - trap_h
+                shape2 = slide.shapes.add_shape(
+                    MSO_SHAPE.TRAPEZOID,
+                    trap_l,
+                    trap_t,
+                    trap_w,
+                    trap_h,
+                )
+                shape2.fill.solid()
+                shape2.fill.fore_color.rgb = RGBColor(30, 50, 90)
+                shape2.fill.transparency = 0.5
+                try:
+                    shape2.line.fill.background()
+                except Exception:
+                    pass
+                self._send_shape_to_back(slide, shape2)
+
+            elif slide_type == "transition":
+                # 过渡页：中心菱形边框或背景纹理
+
+                # 中心大菱形 (减小尺寸，避免遮挡内容)
+                sz = int(slide_h * 0.5)
+                left = (slide_w - sz) // 2
+                top = (slide_h - sz) // 2
+                diamond = slide.shapes.add_shape(MSO_SHAPE.DIAMOND, left, top, sz, sz)
+                diamond.fill.solid()
+                diamond.fill.fore_color.rgb = RGBColor(255, 255, 255)
+                diamond.fill.transparency = 0.95  # 极淡
+                diamond.line.color.rgb = gold
+                diamond.line.width = Pt(1.5)
+
+            elif slide_type == "content" or slide_type == "contents":
+                # 内容页/目录页：顶部标题栏装饰 + 底部页脚条
+
+                # 顶部标题下方的金色细长条
+                header_line = slide.shapes.add_shape(
+                    MSO_SHAPE.RECTANGLE,
+                    Inches(0.5),
+                    Inches(1.3),  # 标题通常在 0.5-1.2 左右
+                    slide_w - Inches(1.0),
+                    Pt(2),
+                )
+                header_line.fill.solid()
+                header_line.fill.fore_color.rgb = gold
+                header_line.line.fill.background()
+
+                # 右上角几何点缀（缩小并推向右上角，避免遮挡标题）
+                acc = slide.shapes.add_shape(
+                    MSO_SHAPE.ISOSCELES_TRIANGLE,
+                    slide_w - Inches(1.0),
+                    -Inches(0.4),
+                    Inches(1.2),
+                    Inches(1.2),
+                )
+                acc.fill.solid()
+                acc.fill.fore_color.rgb = RGBColor(255, 255, 255)
+                acc.fill.transparency = 0.95
+                acc.line.fill.background()
+
+            elif slide_type == "end":
+                # 结束页：呼应封面的几何
+                # 中心圆形
+                circle = slide.shapes.add_shape(
+                    MSO_SHAPE.OVAL,
+                    (slide_w - Inches(4)) // 2,
+                    (slide_h - Inches(4)) // 2,
+                    Inches(4),
+                    Inches(4),
+                )
+                circle.fill.background()  # 无填充
+                circle.line.color.rgb = gold
+                circle.line.width = Pt(2)
+
+        except Exception as e:
+            logger.warning(f"Failed to add royal decorations: {e}")
+
     def _apply_slide_background(self, slide, slide_type: str):
         """根据幻灯片类型和风格应用背景"""
         try:
@@ -286,16 +434,29 @@ class AIPPTToPPTXService:
             if slide_type in ["cover", "end"]:
                 primary_color = self.colors["primary"]
                 background_color = self.colors["background"]
-                # 创建渐变效果：主色调到背景色
-                self._set_gradient_background(
-                    slide, primary_color, background_color, "vertical"
-                )
+
+                # 皇家深蓝特殊处理：封面背景不使用简单的 Primary->BG 渐变，而是保持深色质感
+                if self.style == "皇家深蓝":
+                    # 使用深色微渐变 (Deep Navy -> Slightly Lighter Navy)
+                    c1 = background_color
+                    c2 = self._lighten(background_color, 20)
+                    self._set_gradient_background(slide, c1, c2, "diagonal")
+                else:
+                    # 创建渐变效果：主色调到背景色
+                    self._set_gradient_background(
+                        slide, primary_color, background_color, "vertical"
+                    )
             # 过渡页使用与封面/结束不同的渐变背景（分风格）
             elif slide_type == "transition":
                 self._apply_transition_background(slide)
             # 内容页使用纯色背景
             else:
                 self._set_solid_background(slide, self.colors["background"])
+
+            # 应用高级装饰图案（仅限皇家深蓝）
+            if self.style == "皇家深蓝":
+                self._add_royal_decorations(slide, slide_type)
+
         except Exception as e:
             logger.warning(f"Failed to apply slide background: {e}")
 
@@ -478,9 +639,21 @@ class AIPPTToPPTXService:
             title_paragraph.font.bold = True
             title_paragraph.alignment = PP_ALIGN.CENTER
             try:
+                # 皇家深蓝使用白色或金色标题
                 title_paragraph.font.color.rgb = self.colors["primary"]
             except Exception:
                 pass
+
+            # 皇家深蓝：左对齐布局，配合左侧线条装饰
+            if self.style == "皇家深蓝":
+                slide.shapes.title.left = Inches(1.5)
+                slide.shapes.title.width = self.prs.slide_width - Inches(2.0)
+                slide.shapes.title.top = int(self.prs.slide_height * 0.35)
+                title_paragraph.alignment = PP_ALIGN.LEFT
+                # 增强字体
+                self._set_font_name(
+                    title_paragraph.font, ["PingFang SC Semibold", "Microsoft YaHei UI"]
+                )
 
         # 设置副标题
         if subtitle and len(slide.placeholders) > 1:
@@ -489,6 +662,22 @@ class AIPPTToPPTXService:
             subtitle_paragraph = subtitle_shape.text_frame.paragraphs[0]
             subtitle_paragraph.font.size = Pt(28)
             subtitle_paragraph.alignment = PP_ALIGN.CENTER
+
+            # 皇家深蓝：左对齐
+            if self.style == "皇家深蓝":
+                subtitle_paragraph.alignment = PP_ALIGN.LEFT
+                subtitle_shape.left = Inches(1.5)
+                subtitle_shape.width = self.prs.slide_width - Inches(2.0)
+                try:
+                    # 将副标题移至主标题下方，避免顶部出现内容
+                    title_bottom = slide.shapes.title.top + slide.shapes.title.height
+                    subtitle_shape.top = title_bottom + Inches(0.25)
+                    # 降低存在感：小一号且更柔和的灰白
+                    subtitle_paragraph.font.size = Pt(20)
+                    subtitle_paragraph.font.color.rgb = RGBColor(200, 200, 200)
+                except Exception:
+                    pass
+
             try:
                 subtitle_paragraph.font.color.rgb = self.colors["text"]
             except Exception:
@@ -502,6 +691,12 @@ class AIPPTToPPTXService:
 
         data = slide_data.get("data", {})
         title = data.get("title", "目录")
+
+        # 皇家深蓝：调整标题位置
+        if self.style == "皇家深蓝" and slide.shapes.title:
+            slide.shapes.title.top = Inches(0.5)
+            slide.shapes.title.left = Inches(0.5)
+            slide.shapes.title.text_frame.paragraphs[0].alignment = PP_ALIGN.LEFT
         items = data.get("items", [])
 
         # 设置标题
@@ -711,6 +906,14 @@ class AIPPTToPPTXService:
                         "Microsoft YaHei",
                     ],
                 )
+
+                # 皇家深蓝：标题左对齐，调整位置
+                if self.style == "皇家深蓝":
+                    slide.shapes.title.left = Inches(0.5)
+                    slide.shapes.title.top = Inches(0.5)
+                    slide.shapes.title.width = self.prs.slide_width - Inches(1.0)
+                    slide.shapes.title.height = Inches(1.0)
+                    ph.alignment = PP_ALIGN.LEFT
             except Exception:
                 pass
 
@@ -871,11 +1074,29 @@ class AIPPTToPPTXService:
             url = item.get("url")
             if isinstance(url, str) and url:
                 try:
-                    resp = requests.get(url, timeout=8)
+                    # Some sites enable anti-hotlink; add UA + Referer
+                    parsed = urlparse(url)
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
+                        "Referer": f"{parsed.scheme}://{parsed.netloc}/",
+                        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                    }
+                    resp = requests.get(url, headers=headers, timeout=8)
                     if resp.status_code == 200:
                         ctype = resp.headers.get("content-type", "")
-                        if ctype.startswith("image/") and resp.content:
-                            return io.BytesIO(resp.content), url
+                        # Accept when content-type is image/*; otherwise try to sniff via PIL
+                        if resp.content:
+                            if ctype.startswith("image/"):
+                                return io.BytesIO(resp.content), url
+                            # Try sniffing bytes to tolerate servers that misreport content-type
+                            try:
+                                img_buf = io.BytesIO(resp.content)
+                                img_buf.seek(0)
+                                Image.open(img_buf).verify()  # raises if not an image
+                                img_buf.seek(0)
+                                return img_buf, url
+                            except Exception:
+                                pass
                 except Exception:
                     pass
             return None, str(url or "")
@@ -903,11 +1124,17 @@ class AIPPTToPPTXService:
                 return 0
 
         # 预估需要的高度并在两张图时进行自适应缩放，确保不越界
-        measured: List[Tuple[io.BytesIO | str | None, str, int]] = []  # (src, hint, est_height)
+        measured: List[Tuple[io.BytesIO | str | None, str, int]] = (
+            []
+        )  # (src, hint, est_height)
         spacing = Inches(0.2)
         for img in imgs:
             pic_src, hint = _resolve_image_source(img)
-            est_h = _measure_scaled_height(pic_src, int(right_w)) if pic_src is not None else 0
+            est_h = (
+                _measure_scaled_height(pic_src, int(right_w))
+                if pic_src is not None
+                else 0
+            )
             measured.append((pic_src, hint, est_h))
 
         # 如果两张图高度总和超过可用高度，则按比例缩小宽度
@@ -921,22 +1148,44 @@ class AIPPTToPPTXService:
         # 底线：不允许超出右侧可用块的底部
         max_bottom = int(right_top + block_h)
 
+        def _shorten_hint(h: str) -> str:
+            try:
+                if not h:
+                    return "图片不可用"
+                p = urlparse(h)
+                if p.scheme and p.netloc:
+                    last = (p.path or "/").rstrip("/").split("/")[-1]
+                    last = last[:40] + ("…" if len(last) > 40 else "")
+                    return f"{p.netloc}/{last}" if last else p.netloc
+                return h[:50] + ("…" if len(h) > 50 else "")
+            except Exception:
+                return (h or "")[:50]
+
         for pic_src, hint, _ in measured:
             title = "图片"
-            caption = hint
+            caption = _shorten_hint(hint)
             try:
                 if pic_src is None:
-                    if len(slide.placeholders) > 1:
-                        tf = slide.placeholders[1].text_frame
-                        p = tf.add_paragraph()
+                    # 在右侧媒体区添加占位文本框，不污染正文区
+                    try:
+                        tb = slide.shapes.add_textbox(
+                            right_left, cursor_top, int(right_w), Inches(0.9)
+                        )
+                        tf = tb.text_frame
+                        tf.clear()
+                        p = tf.paragraphs[0]
                         p.text = f"{title}: {caption}"
-                        p.font.size = Pt(18)
+                        p.font.size = Pt(14)
                         p.level = 0
                         self._disable_bullets_paragraph(p)
                         try:
                             p.font.color.rgb = self.colors["text"]
                         except Exception:
                             pass
+                        cursor_top = cursor_top + int(tb.height) + int(spacing)
+                    except Exception:
+                        # 静默跳过
+                        pass
                 else:
                     pic = slide.shapes.add_picture(
                         pic_src, right_left, cursor_top, width=int(right_w)
@@ -990,9 +1239,19 @@ class AIPPTToPPTXService:
                             cell = table.cell(r_idx, c)
                             cell.text = str(val)
                             try:
-                                cell.text_frame.paragraphs[0].font.color.rgb = (
-                                    self.colors["text"]
-                                )
+                                if self.style == "皇家深蓝":
+                                    # 深底浅字，提高可读性
+                                    cell.fill.solid()
+                                    deep_navy = self._lighten(self.colors["background"], 12)
+                                    cell.fill.fore_color.rgb = deep_navy
+                                    p = cell.text_frame.paragraphs[0]
+                                    p.font.color.rgb = RGBColor(255, 255, 255)
+                                    p.font.size = Pt(14)
+                                    p.line_spacing = 1.15
+                                else:
+                                    cell.text_frame.paragraphs[0].font.color.rgb = (
+                                        self.colors["text"]
+                                    )
                             except Exception:
                                 pass
                         r_idx += 1

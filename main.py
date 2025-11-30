@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import time
 from typing import List, Optional
 
 import uvicorn
@@ -276,6 +277,7 @@ async def generate_report_endpoint(
         },
     )
     try:
+        t0 = time.perf_counter()
         if not topic.strip():
             raise HTTPException(status_code=400, detail="topic 不能为空")
 
@@ -284,32 +286,150 @@ async def generate_report_endpoint(
         summary_service = DocumentSummaryService()
         parsed_content = ""
         reference_sources: list[str] = []
+
+        def _escape_for_prompt(text: str) -> str:
+            # Lightweight escaping to neutralize common prompt/control tokens
+            if not text:
+                return ""
+            t = text.replace("```", "`\u200b``").replace("<|", "＜|").replace("|>", "|＞")
+            return t
+
+        def _truncate(v: str, n: int = 200) -> str:
+            return v if not v or len(v) <= n else v[:n]
+
         if upload_files:
             reference_sources = [
                 file.filename or f"上传文件{idx + 1}"
                 for idx, file in enumerate(upload_files)
             ]
+            # Per-file parsing and ≤1000字摘要
+            log_execution_event(
+                "document_upload",
+                "Start processing uploaded files",
+                {
+                    "file_count": len(upload_files),
+                    "filenames": [file.filename for file in upload_files],
+                },
+            )
+            per_file_summaries: list[str] = []
             try:
-                parsed_content = await parser_service.parse_uploaded_files(upload_files)
+                t_up0 = time.perf_counter()
+                for file in upload_files:
+                    # Parse each file independently to enable per-file summaries
+                    log_execution_event(
+                        "document_upload",
+                        "Begin processing single file",
+                        {"filename": file.filename},
+                    )
+                    single_parsed = await parser_service.parse_uploaded_files([file])
+                    log_execution_event(
+                        "document_upload",
+                        "Single file parsed (report)",
+                        {
+                            "filename": file.filename,
+                            "parsed_length": len(single_parsed or ""),
+                            "parsed_preview": _truncate(single_parsed or "", 180),
+                        },
+                    )
+
+                    # Escape and summarize with strict 1000-char cap
+                    pre_len = len(single_parsed or "")
+                    escaped = _escape_for_prompt(single_parsed)
+                    post_len = len(escaped)
+                    log_execution_event(
+                        "document_upload",
+                        "Escaping completed",
+                        {
+                            "filename": file.filename,
+                            "before_length": pre_len,
+                            "after_length": post_len,
+                        },
+                    )
+                    block = f"```\n{escaped}\n```"
+                    try:
+                        log_execution_event(
+                            "upload_summary",
+                            "LLM summarization start",
+                            {
+                                "filename": file.filename,
+                                "cap_chars": 1000,
+                                "input_length": len(block),
+                            },
+                        )
+                        summary_text = await summary_service.summarize_limited(
+                            block,
+                            language=language or "zh",
+                            max_chars=1000,
+                        )
+                        log_execution_event(
+                            "upload_summary",
+                            "LLM summarization completed",
+                            {
+                                "filename": file.filename,
+                                "summary_length": len(summary_text or ""),
+                                "summary_preview": _truncate(summary_text or "", 180),
+                            },
+                        )
+                    except Exception as _e:
+                        # Fallback to trimmed raw content if LLM unavailable
+                        summary_text = (escaped or "")[:1000]
+                        log_execution_event(
+                            "upload_summary",
+                            "LLM summarization failed; fallback used",
+                            {
+                                "filename": file.filename,
+                                "error": _truncate(str(_e), 200),
+                                "fallback_length": len(summary_text or ""),
+                            },
+                        )
+
+                    per_file_summaries.append(
+                        f"【{file.filename or '未命名文件'}】摘要：\n{summary_text}"
+                    )
+                    log_execution_event(
+                        "upload_summary",
+                        "File summary appended",
+                        {
+                            "filename": file.filename,
+                            "current_summary_count": len(per_file_summaries),
+                        },
+                    )
+
+                parsed_content = "\n\n".join(per_file_summaries).strip()
                 log_execution_event(
                     "document_upload",
-                    "Uploaded files parsed (report)",
+                    "Per-file summaries prepared",
                     {
                         "file_count": len(upload_files),
                         "filenames": [file.filename for file in upload_files],
-                        "parsed_length": len(parsed_content),
+                        "summary_total_length": len(parsed_content),
+                        "summary_count": len(per_file_summaries),
+                        "duration_sec": round(time.perf_counter() - t_up0, 3),
                     },
                 )
             except Exception as e:
                 end_execution_log(status="failed", details={"error": str(e)})
-                raise HTTPException(status_code=400, detail=f"文件解析失败: {str(e)}")
-            # Summarize parsed content for prompt context
-            if parsed_content.strip():
-                try:
-                    summary_text = await summary_service.summarize(parsed_content, language=language)
-                    parsed_content = summary_text  # pass summary to agent prompt
-                except Exception:
-                    pass
+                raise HTTPException(status_code=400, detail=f"文件解析或摘要失败: {str(e)}")
+        else:
+            log_execution_event(
+                "document_upload",
+                "No upload files provided",
+                {},
+            )
+
+        log_execution_event(
+            "report_generation",
+            "Format branch selected",
+            {
+                "format": format.lower(),
+                "language": language,
+                "style": style,
+                "model": model,
+                "has_reference": bool(parsed_content.strip()),
+                "reference_length": len(parsed_content or ""),
+                "reference_sources": len(reference_sources or []),
+            },
+        )
 
         if format.lower() == "pptx":
             # New behavior: generate PPTX locally (no third-party API)
@@ -322,10 +442,20 @@ async def generate_report_endpoint(
                 enrich_aippt_content
 
             # Step 1: Generate PPT outline
+            t_o0 = time.perf_counter()
             outline_result = await generate_aippt_outline(
                 topic=topic.strip(),
                 language=language,
                 reference_content=parsed_content,
+            )
+            log_execution_event(
+                "report_generation",
+                "Outline generation finished",
+                {
+                    "status": outline_result.get("status"),
+                    "duration_sec": round(time.perf_counter() - t_o0, 3),
+                    "slides": len(outline_result.get("outline") or []),
+                },
             )
 
             if outline_result["status"] == "failed":
@@ -336,11 +466,40 @@ async def generate_report_endpoint(
 
             # Step 2: Enrich content (text/case) via dedicated LLM pass
             try:
+                t_e0 = time.perf_counter()
+                # 2.0: collect web summaries (Bocha→Google) as auxiliary reference
+                try:
+                    from app.services.web_summary_service import collect_search_summaries
+                    web_sum_text, web_sources = await collect_search_summaries(
+                        query=topic.strip(), top_k=8
+                    )
+                except Exception as _ws_e:
+                    web_sum_text, web_sources = "", []
+                    log_execution_event(
+                        "web_summary",
+                        "Skipped (error during summary collection)",
+                        {"error": str(_ws_e)},
+                    )
+
+                # Merge uploaded reference content with web summaries for enrichment
+                combined_reference = "\n".join(
+                    x for x in [parsed_content or "", web_sum_text or ""] if x.strip()
+                )
                 enrich_res = await enrich_aippt_content(
                     outline=outline_result["outline"],
                     topic=topic.strip(),
                     language=language or "zh",
-                    reference_content=parsed_content or None,
+                    reference_content=(combined_reference or None),
+                )
+                log_execution_event(
+                    "report_generation",
+                    "Text enrichment finished",
+                    {
+                        "status": enrich_res.get("status"),
+                        "updated": enrich_res.get("updated", 0),
+                        "duration_sec": round(time.perf_counter() - t_e0, 3),
+                        "web_sources": len(web_sources),
+                    },
                 )
                 # Step 2.5: Media enrichment (images & tables) after text enrichment
                 from app.services.aippt_media_enrichment_service import (
@@ -349,6 +508,7 @@ async def generate_report_endpoint(
                 text_enriched_outline = (
                     enrich_res.get("outline") or outline_result["outline"]
                 )
+                t_m0 = time.perf_counter()
                 media_res = await enrich_media_outline(
                     outline=text_enriched_outline,
                     topic=topic.strip(),
@@ -363,6 +523,7 @@ async def generate_report_endpoint(
                         "text_updated": enrich_res.get("updated", 0),
                         "media_images": media_res.get("images_added", 0),
                         "media_tables": media_res.get("tables_added", 0),
+                        "media_duration_sec": round(time.perf_counter() - t_m0, 3),
                     },
                 )
             except Exception as _e:
@@ -373,6 +534,7 @@ async def generate_report_endpoint(
                     final_outline = outline_result["outline"]
 
             # Step 3: Generate PPTX; use direct_convert to preserve enriched content
+            t_g0 = time.perf_counter()
             result = await generate_pptx_from_aippt(
                 topic=topic.strip(),
                 outline=final_outline,
@@ -382,8 +544,28 @@ async def generate_report_endpoint(
                 filepath=filepath,
                 direct_convert=True,
             )
+            log_execution_event(
+                "report_generation",
+                "PPTX generation finished",
+                {
+                    "status": result.get("status"),
+                    "filepath": result.get("filepath"),
+                    "duration_sec": round(time.perf_counter() - t_g0, 3),
+                },
+            )
         else:
             # default to docx path to preserve backward compat
+            t_d0 = time.perf_counter()
+            log_execution_event(
+                "report_generation",
+                "DOCX path invoked",
+                {
+                    "language": language,
+                    "filepath": filepath,
+                    "reference_length": len(parsed_content or ""),
+                    "reference_sources": len(reference_sources or []),
+                },
+            )
             result = await generate_report_from_steps(
                 topic=topic.strip(),
                 language=language,
@@ -392,12 +574,31 @@ async def generate_report_endpoint(
                 reference_content=parsed_content,
                 reference_sources=reference_sources,
             )
+            log_execution_event(
+                "report_generation",
+                "DOCX generation finished",
+                {
+                    "status": result.get("status"),
+                    "filepath": result.get("filepath"),
+                    "duration_sec": round(time.perf_counter() - t_d0, 3),
+                },
+            )
         log_execution_event(
             "workflow",
             "Report generated",
-            {"filepath": result.get("filepath"), "title": result.get("title")},
+            {
+                "filepath": result.get("filepath"),
+                "title": result.get("title"),
+                "total_duration_sec": round(time.perf_counter() - t0, 3),
+            },
         )
-        end_execution_log(status="completed", details={"filepath": result.get("filepath")})
+        end_execution_log(
+            status="completed",
+            details={
+                "filepath": result.get("filepath"),
+                "total_duration_sec": round(time.perf_counter() - t0, 3),
+            },
+        )
         log_closed = True
         return ReportResult(**result)
     except HTTPException as exc:

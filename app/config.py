@@ -118,6 +118,22 @@ class SearchSettings(BaseModel):
         default="https://api.bing.microsoft.com/v7.0/search",
         description="Bing Web Search API endpoint",
     )
+    # Bocha AI search (optional)
+    bocha_api_key: Optional[str] = Field(
+        default=None, description="Bocha API key (https://open.bocha.cn)"
+    )
+    bocha_freshness: Optional[str] = Field(
+        default=None, description="Bocha freshness window: noLimit|oneDay|oneWeek|oneMonth|oneYear"
+    )
+    bocha_summary: Optional[bool] = Field(
+        default=False, description="Whether Bocha returns summaries"
+    )
+    bocha_include: Optional[str] = Field(
+        default=None, description="Bocha include domains (pipe-delimited)"
+    )
+    bocha_exclude: Optional[str] = Field(
+        default=None, description="Bocha exclude domains (pipe-delimited)"
+    )
 
 class ImageSearchSettings(BaseModel):
     provider_priority: List[str] = Field(
@@ -449,6 +465,19 @@ class Config:
                 browser_settings = BrowserSettings(**valid_browser_params)
 
         search_config = raw_config.get("search", {})
+
+        # Backward-compat: allow Bocha keys at top-level (outside [search])
+        # If present and not already set under [search], copy them in so that
+        # app.tool.search.bocha_search can read them from config.search_config
+        for k in [
+            "bocha_api_key",
+            "bocha_freshness",
+            "bocha_summary",
+            "bocha_include",
+            "bocha_exclude",
+        ]:
+            if k in raw_config and k not in search_config:
+                search_config[k] = raw_config[k]
         search_settings = None
         if search_config:
             search_settings = SearchSettings(**search_config)

@@ -117,6 +117,14 @@ temperature = 0.0                          # Controls randomness for vision mode
 # bing_api_key = "YOUR_BING_WEB_SEARCH_KEY"
 # bing_api_endpoint = "https://api.bing.microsoft.com/v7.0/search"
 
+# Bocha AI Search configuration (optional)
+# Get your API key from https://open.bocha.cn
+# bocha_api_key = "your_bocha_api_key_here"
+# bocha_freshness = "noLimit"  # Options: noLimit, oneDay, oneWeek, oneMonth, oneYear
+# bocha_summary = true  # Include summary in search results
+# bocha_include = "qq.com|m.163.com"  # Specify websites to include (domains separated by |)
+# bocha_exclude = "qq.com|m.163.com"  # Specify websites to exclude (domains separated by |)
+
 # Optional configuration, Image search settings.
 #[image_search]
 # provider_priority = ["google_cse", "playwright"]

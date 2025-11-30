@@ -33,16 +33,49 @@ def _is_probably_image_url(u: str) -> bool:
         any(ext in low for ext in [".jpg?", ".jpeg?", ".png?", ".webp?"])
 
 
-async def _http_head(client: httpx.AsyncClient, url: str) -> Tuple[Optional[str], Optional[int]]:
+def _referer_for(url: str, source: Optional[str]) -> str:
     try:
-        r = await client.head(url, follow_redirects=True, timeout=8)
+        if source:
+            # use the actual host page as referer when available
+            sp = urlparse(source)
+            if sp.scheme and sp.netloc:
+                return f"{sp.scheme}://{sp.netloc}/"
+    except Exception:
+        pass
+    try:
+        up = urlparse(url)
+        if up.scheme and up.netloc:
+            return f"{up.scheme}://{up.netloc}/"
+    except Exception:
+        pass
+    return ""
+
+
+async def _http_head(client: httpx.AsyncClient, url: str, source: Optional[str]) -> Tuple[Optional[str], Optional[int]]:
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        }
+        ref = _referer_for(url, source)
+        if ref:
+            headers["Referer"] = ref
+        r = await client.head(url, headers=headers, follow_redirects=True, timeout=8)
         if r.status_code >= 200 and r.status_code < 400:
             return r.headers.get("content-type"), int(r.headers.get("content-length") or 0)
     except Exception:
         pass
     # Fallback small GET for servers not supporting HEAD
     try:
-        r = await client.get(url, follow_redirects=True, timeout=10, headers={"Range": "bytes=0-0"})
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            "Range": "bytes=0-0",
+        }
+        ref = _referer_for(url, source)
+        if ref:
+            headers["Referer"] = ref
+        r = await client.get(url, headers=headers, follow_redirects=True, timeout=10)
         if r.status_code in (200, 206):
             return r.headers.get("content-type"), int(r.headers.get("content-length") or 0)
     except Exception:
@@ -50,76 +83,17 @@ async def _http_head(client: httpx.AsyncClient, url: str) -> Tuple[Optional[str]
     return None, None
 
 
-class GoogleImageSearchProvider:
-    """Google Custom Search JSON API (image search via CSE).
+"""Image retrieval utilities used by PPT media enrichment.
 
-    Requires `google_api_key` and `google_cx` in [image_search] config.
-    """
-
-    def __init__(self):
-        cfg = getattr(config, "image_search_config", None)
-        self.api_key = None
-        self.cx = None
-        self.endpoint = "https://www.googleapis.com/customsearch/v1"
-        self.safe = "medium"
-        self.gl = None  # country code
-        self.lr = None  # language restrict
-        if cfg:
-            self.api_key = getattr(cfg, "google_api_key", None)
-            self.cx = getattr(cfg, "google_cx", None)
-            self.endpoint = getattr(cfg, "google_endpoint", None) or self.endpoint
-            self.safe = getattr(cfg, "google_safe", "medium")
-        # borrow from general search config when present
-        scfg = getattr(config, "search_config", None)
-        if scfg:
-            self.gl = getattr(scfg, "country", None)
-            lang = getattr(scfg, "lang", None)
-            if lang:
-                # Google lr format like 'lang_en', 'lang_zh-CN'
-                self.lr = f"lang_{lang}"
-
-    def available(self) -> bool:
-        return bool(self.api_key and self.cx)
-
-    async def search(self, query: str, count: int = 10) -> List[ImageCandidate]:
-        if not self.available():
-            return []
-        params = {
-            "key": self.api_key,
-            "cx": self.cx,
-            "q": query,
-            "num": min(max(count, 1), 10),  # Google max per page is 10
-            "searchType": "image",
-            "safe": self.safe,  # off|medium|high
-        }
-        if self.gl:
-            params["gl"] = self.gl
-        if self.lr:
-            params["lr"] = self.lr
-
-        async with httpx.AsyncClient(timeout=15) as client:
-            try:
-                r = await client.get(self.endpoint, params=params)
-                if r.status_code != 200:
-                    logger.warning(f"Google CSE non-200: {r.status_code} {r.text[:200]}")
-                    return []
-                data = r.json()
-                items = data.get("items") or []
-                out: List[ImageCandidate] = []
-                for it in items:
-                    link = it.get("link")  # direct image url
-                    img = it.get("image") or {}
-                    ctx = img.get("contextLink") or it.get("displayLink")
-                    if not link:
-                        continue
-                    out.append(ImageCandidate(url=link, source=ctx))
-                return out
-            except Exception as e:
-                logger.warning(f"Google CSE failed: {e}")
-                return []
+This module previously relied on a dedicated [image_search] configuration
+with Google CSE/Bing providers. The new approach intentionally routes all
+web discovery through the generic WebSearch tool, whose engine order is
+driven by [search] in config.toml (e.g., Bocha → Google). We then visit a
+few top result pages and extract actual image URLs, verifying them via HEAD.
+"""
 
 
-async def _playwright_collect_images_from_page(page, collected: Set[str]) -> None:
+async def _playwright_collect_images_from_page(page, collected: Set[str], source_map: dict) -> None:
     # Capture network responses for images (catches dynamic requests)
     def _on_response(response):
         try:
@@ -127,6 +101,11 @@ async def _playwright_collect_images_from_page(page, collected: Set[str]) -> Non
             url = response.url
             if url and ct.startswith("image/"):
                 collected.add(url)
+                try:
+                    if url not in source_map:
+                        source_map[url] = page.url
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -179,11 +158,16 @@ async def _playwright_collect_images_from_page(page, collected: Set[str]) -> Non
         urls = await page.evaluate(script)
         for u in urls:
             collected.add(u)
+            try:
+                if u not in source_map:
+                    source_map[u] = page.url
+            except Exception:
+                pass
     except Exception:
         pass
 
 
-async def _playwright_fetch_images_from_urls(urls: List[str], max_pages: int = 3) -> List[ImageCandidate]:
+async def _playwright_fetch_images_from_urls(urls: List[str], max_pages: int = 10) -> List[ImageCandidate]:
     from playwright.async_api import async_playwright
 
     browser_cfg = getattr(config, "browser_config", None)
@@ -191,6 +175,7 @@ async def _playwright_fetch_images_from_urls(urls: List[str], max_pages: int = 3
     timeout_ms = 20_000
 
     collected: Set[str] = set()
+    source_map: dict[str, str] = {}
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless, args=getattr(browser_cfg, "extra_chromium_args", []) or [])
         page = await browser.new_page()
@@ -207,7 +192,7 @@ async def _playwright_fetch_images_from_urls(urls: List[str], max_pages: int = 3
                     await page.wait_for_load_state("networkidle", timeout=timeout_ms)
                 except Exception:
                     pass
-                await _playwright_collect_images_from_page(page, collected)
+                await _playwright_collect_images_from_page(page, collected, source_map)
             except Exception:
                 continue
         await browser.close()
@@ -216,97 +201,239 @@ async def _playwright_fetch_images_from_urls(urls: List[str], max_pages: int = 3
     out = []
     for u in collected:
         if _is_probably_image_url(u):
-            out.append(ImageCandidate(url=u))
+            out.append(ImageCandidate(url=u, source=source_map.get(u)))
     return out
 
 
-async def _discover_with_playwright_fallback(query: str, count: int = 8) -> List[ImageCandidate]:
-    """Fallback strategy:
-    - Use existing WebSearch tool to get a few top pages
-    - Visit them with Playwright and extract images after JS render
+async def _simple_fetch_images_from_urls(urls: List[str], max_pages: int = 10) -> List[ImageCandidate]:
+    """Lightweight fallback when Playwright is unavailable.
+
+    Fetch a few pages via requests and extract og:image and <img> URLs.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    }
+    out: List[ImageCandidate] = []
+    seen: Set[str] = set()
+    for url in urls[:max_pages]:
+        try:
+            r = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: httpx.get(url, headers=headers, timeout=10)
+            )
+            if r.status_code != 200 or not r.text:
+                continue
+            from bs4 import BeautifulSoup  # local import to avoid hard dep
+
+            soup = BeautifulSoup(r.text, "html.parser")
+            og = soup.find("meta", property="og:image")
+            if og and og.get("content"):
+                u = og.get("content")
+                try:
+                    u = httpx.URL(u, base=url).human_repr()
+                except Exception:
+                    pass
+                if _is_probably_image_url(u) and u not in seen:
+                    seen.add(u)
+                    out.append(ImageCandidate(url=u, source=url))
+            for img in soup.find_all("img"):
+                src = img.get("src") or img.get("data-src")
+                if not src:
+                    continue
+                try:
+                    u = httpx.URL(src, base=url).human_repr()
+                except Exception:
+                    u = src
+                if _is_probably_image_url(u) and u not in seen:
+                    seen.add(u)
+                    out.append(ImageCandidate(url=u, source=url))
+                # do not prematurely cut; collect broadly then rank later
+        except Exception:
+            continue
+    return out
+
+
+async def _discover_with_playwright_fallback(query: str, count: int = 24) -> List[ImageCandidate]:
+    """Discovery strategy powered by generic WebSearch + page extraction.
+
+    - Use WebSearch (engine order from [search]) to get top result pages
+    - Visit them with Playwright to capture dynamically loaded images
+    - If Playwright is unavailable, fall back to simple HTML extraction
     """
     from app.tool.web_search import WebSearch
 
     ws = WebSearch()
-    res = await ws.execute(query=query, num_results=5, fetch_content=False)
+    # Fetch more seed pages to improve coverage/quality
+    # 限制单次检索最大 10 条（Bocha 也已在底层强制 ≤10），保持与需求一致
+    res = await ws.execute(query=query, num_results=10, fetch_content=False)
     seed_urls = [r.url for r in (res.results or []) if r.url]
+    # 同一条内容（URL）只处理一次
+    seen_pages: Set[str] = set()
+    uniq_seed_urls: List[str] = []
+    for u in seed_urls:
+        if u not in seen_pages:
+            seen_pages.add(u)
+            uniq_seed_urls.append(u)
+    seed_urls = uniq_seed_urls
     if not seed_urls:
         return []
-    cands = await _playwright_fetch_images_from_urls(seed_urls, max_pages=min(5, len(seed_urls)))
-    # De-dup and limit
+    # Try Playwright first; gracefully fall back to simple parser
+    try:
+        cands = await _playwright_fetch_images_from_urls(
+            seed_urls, max_pages=min(20, len(seed_urls))
+        )
+    except Exception as e:
+        logger.info(f"Playwright not available, using simple extractor: {e}")
+        cands = await _simple_fetch_images_from_urls(
+            seed_urls, max_pages=min(20, len(seed_urls))
+        )
+    # De-dup only; do NOT limit here. We'll verify, score, then pick.
     seen: Set[str] = set()
     out: List[ImageCandidate] = []
     for c in cands:
         if c.url not in seen:
             seen.add(c.url)
             out.append(c)
-        if len(out) >= count:
-            break
     return out
 
 
-async def _verify_candidates(cands: List[ImageCandidate], max_items: int) -> List[ImageCandidate]:
-    """HEAD-verify candidates and keep images with valid content-type and size.
+def _domain_quality_score(url: str) -> int:
+    try:
+        netloc = urlparse(url).netloc.lower()
+    except Exception:
+        return 0
+    good = [
+        "wikipedia.org",
+        "wikimedia.org",
+        "gov.cn",
+        "gov",
+        "edu",
+        "reuters.com",
+        "bbc.co.uk",
+        "nytimes.com",
+        "nature.com",
+        "sohu.com",
+        "thepaper.cn",
+        "alibabagroup.com",
+    ]
+    bad = ["pinimg.com", "pinterest.com", "fbcdn.net", "facebook.com", "x.com"]
+    score = 0
+    if any(netloc.endswith(d) for d in good):
+        score += 3
+    if any(netloc.endswith(d) for d in bad):
+        score -= 2
+    return score
+
+
+def _rank_candidates(cands: List[ImageCandidate], query: str, limit: int) -> List[ImageCandidate]:
+    # Tokenize query for overlap scoring
+    q_tokens = [t.lower() for t in re.split(r"[^\w\u4e00-\u9fa5]+", query) if t]
+
+    def score(c: ImageCandidate) -> float:
+        s = 0.0
+        low = c.url.lower()
+        # prefer larger files (>30KB), penalize tiny files
+        size = c.size_bytes or 0
+        if size >= 200_000:
+            s += 3
+        elif size >= 80_000:
+            s += 2
+        elif size >= 30_000:
+            s += 1
+        else:
+            s -= 1
+        # prefer jpeg/png over webp slightly
+        if low.endswith((".jpg", ".jpeg")):
+            s += 1.2
+        elif low.endswith(".png"):
+            s += 1.0
+        elif low.endswith(".webp"):
+            s += 0.3
+        # penalize thumbnails and sprites
+        if any(h in low for h in ["thumbnail", "thumb", "sprite", "icon", "avatar", "logo", "qrcode", "qr", "placeholder"]):
+            s -= 2.5
+        # domain quality
+        s += _domain_quality_score(c.url)
+        # simple token overlap
+        for t in q_tokens:
+            if t and t in low:
+                s += 0.6
+        return s
+
+    ranked = sorted(cands, key=score, reverse=True)
+    return ranked[:limit]
+
+
+async def _verify_candidates(cands: List[ImageCandidate], want: int) -> List[ImageCandidate]:
+    """HEAD-verify a broader pool, then return verified candidates with metadata.
     """
     verified: List[ImageCandidate] = []
+    # verify up to 60 items to get enough size info for ranking
+    probe_n = min(60, max(want * 6, len(cands)))
     async with httpx.AsyncClient(timeout=10) as client:
-        tasks = [
-            _http_head(client, c.url) for c in cands[: max_items * 2]  # probe extra to compensate drops
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for c, res in zip(cands, results):
+        # First pass: test with domain-root referer only (best for downstream fetch)
+        tasks1 = [_http_head(client, c.url, source=None) for c in cands[:probe_n]]
+        results1 = await asyncio.gather(*tasks1, return_exceptions=True)
+        remaining: List[ImageCandidate] = []
+        for c, res in zip(cands[:probe_n], results1):
             if isinstance(res, Exception):
+                remaining.append(c)
                 continue
             ctype, size = res
             if not ctype or not ctype.lower().startswith("image/"):
-                # allow when URL is strongly indicative of image type
                 if not _is_probably_image_url(c.url):
+                    remaining.append(c)
                     continue
             c.content_type = ctype
             c.size_bytes = size
             verified.append(c)
-            if len(verified) >= max_items:
-                break
+
+        # Optional second pass: with source referer for sites that require it
+        # We do NOT include these by default to avoid later PPT download failures.
+        # Keep only if we still lack enough items and have no other choice.
+        if len(verified) < want and remaining:
+            tasks2 = [_http_head(client, c.url, source=c.source) for c in remaining]
+            results2 = await asyncio.gather(*tasks2, return_exceptions=True)
+            for c, res in zip(remaining, results2):
+                if isinstance(res, Exception):
+                    continue
+                ctype, size = res
+                if not ctype or not ctype.lower().startswith("image/"):
+                    if not _is_probably_image_url(c.url):
+                        continue
+                c.content_type = ctype
+                c.size_bytes = size
+                verified.append(c)
     return verified
 
 
 async def discover_image_urls(query: str, max_images: int = 4) -> List[str]:
-    """High-reliability image discovery pipeline.
+    """Image discovery via generic WebSearch + page extraction.
 
-    1) Try official Bing Image Search API if configured
-    2) Fallback to Playwright: search pages and extract rendered images
-    3) Verify by HEAD/GET, normalize and return direct URLs
+    Uses the [search] engine order from config.toml (e.g., Bocha → Google)
+    to find relevant pages, extracts candidate image URLs, verifies them with
+    HEAD, and returns direct image links.
     """
-    log_execution_event("image_discovery", "start", {"query": query, "max": max_images})
+    log_execution_event(
+        "image_discovery",
+        "start",
+        {"query": query, "max": max_images, "engine": getattr(getattr(config, "search_config", None), "engine", "")},
+    )
 
-    # Stage 1: API providers according to priority
-    candidates: List[ImageCandidate] = []
-    priority = ["google_cse", "playwright"]
-    cfg = getattr(config, "image_search_config", None)
-    if cfg and getattr(cfg, "provider_priority", None):
-        priority = list(cfg.provider_priority)
-
-    for provider in priority:
-        if provider == "google_cse":
-            g = GoogleImageSearchProvider()
-            if g.available():
-                try:
-                    candidates = await g.search(query, count=max_images * 3)
-                except Exception as e:
-                    logger.warning(f"Google CSE error: {e}")
-        elif provider == "playwright":
-            candidates = await _discover_with_playwright_fallback(query, count=max_images * 3)
-        # stop at first that yields results
-        if candidates:
-            break
+    candidates: List[ImageCandidate] = await _discover_with_playwright_fallback(
+        query, count=max_images * 6
+    )
 
     if not candidates:
         log_execution_event("image_discovery", "no_candidates", {"query": query})
         return []
 
-    # Stage 3: Verify & normalize
+    # Verify many, then rank and pick best
     verified = await _verify_candidates(candidates, max_images)
-    urls = [c.url for c in verified]
+    if not verified:
+        log_execution_event("image_discovery", "verified_empty", {"query": query})
+        return []
+    picked = _rank_candidates(verified, query=query, limit=max_images)
+    urls = [c.url for c in picked]
     log_execution_event("image_discovery", "done", {"found": len(urls)})
     return urls
 

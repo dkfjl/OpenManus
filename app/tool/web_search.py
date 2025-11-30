@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional
 import requests
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, ConfigDict, Field, model_validator
- # removed tenacity-based decorator for configurable attempts
 
 from app.config import config
 from app.logger import logger
@@ -12,11 +11,14 @@ from app.tool.base import BaseTool, ToolResult
 from app.tool.search import (
     BaiduSearchEngine,
     BingSearchEngine,
+    BochaSearchEngine,
     DuckDuckGoSearchEngine,
     GoogleSearchEngine,
     WebSearchEngine,
 )
 from app.tool.search.base import SearchItem
+
+# removed tenacity-based decorator for configurable attempts
 
 
 class SearchResult(BaseModel):
@@ -125,11 +127,14 @@ class WebContentFetcher:
         try:
             # Normalize problematic URLs (e.g., Baidu relative links or redirect stubs)
             from urllib.parse import urlparse
+
             if url.startswith("/s?"):
                 url = "https://www.baidu.com" + url
             parsed = urlparse(url)
             # Skip fetching Baidu search/redirect pages that often block or are not content
-            if parsed.netloc.endswith("baidu.com") and parsed.path.startswith(("/s", "/link")):
+            if parsed.netloc.endswith("baidu.com") and parsed.path.startswith(
+                ("/s", "/link")
+            ):
                 logger.debug(f"Skip fetching content from Baidu utility URL: {url}")
                 return None
             # Use asyncio to run requests in a thread pool
@@ -204,6 +209,7 @@ class WebSearch(BaseTool):
         "baidu": BaiduSearchEngine(),
         "duckduckgo": DuckDuckGoSearchEngine(),
         "bing": BingSearchEngine(),
+        "bocha": BochaSearchEngine(),
     }
     content_fetcher: WebContentFetcher = WebContentFetcher()
 
@@ -375,7 +381,10 @@ class WebSearch(BaseTool):
         )
         fallbacks = []
         if config.search_config and hasattr(config.search_config, "fallback_engines"):
-            fallbacks = [engine.lower() for engine in (config.search_config.fallback_engines or [])]
+            fallbacks = [
+                engine.lower()
+                for engine in (config.search_config.fallback_engines or [])
+            ]
 
         # Start with preferred engine, then explicitly configured fallbacks only
         engine_order = [preferred] if preferred in self._search_engine else []
@@ -385,7 +394,11 @@ class WebSearch(BaseTool):
 
         # If no engines resolved (e.g., bad config), fall back to a safe default order
         if not engine_order:
-            engine_order = [e for e in ["google", "duckduckgo", "bing", "baidu"] if e in self._search_engine]
+            engine_order = [
+                e
+                for e in ["google", "duckduckgo", "bing", "baidu", "bocha"]
+                if e in self._search_engine
+            ]
 
         return engine_order
 
@@ -428,7 +441,7 @@ class WebSearch(BaseTool):
                 if attempt < attempts - 1:
                     try:
                         # simple exponential backoff within configured bounds
-                        delay = min(max_delay, max(min_delay, min_delay * (2 ** attempt)))
+                        delay = min(max_delay, max(min_delay, min_delay * (2**attempt)))
                         await asyncio.sleep(delay)
                     except Exception:
                         pass
