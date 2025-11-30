@@ -4,6 +4,8 @@ import requests
 from bs4 import BeautifulSoup
 
 from app.logger import logger
+from app.config import config
+from urllib.parse import urlencode
 from app.tool.search.base import SearchItem, WebSearchEngine
 
 
@@ -44,6 +46,26 @@ class BingSearchEngine(WebSearchEngine):
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
 
+    def _build_search_url(self, query: str) -> str:
+        # Read optional settings
+        scfg = getattr(config, "search_config", None)
+        mkt = getattr(scfg, "bing_mkt", None) if scfg else None
+        cc = getattr(scfg, "bing_cc", None) if scfg else None
+        lang = getattr(scfg, "bing_lang", None) if scfg else None
+        adlt = getattr(scfg, "bing_safesearch", None) if scfg else None
+
+        params = {"q": query}
+        if mkt:
+            params["mkt"] = mkt
+            params["setmkt"] = mkt
+        if lang:
+            params["setlang"] = lang
+        if cc:
+            params["cc"] = cc
+        if adlt:
+            params["adlt"] = adlt  # off|moderate|strict
+        return f"{BING_HOST_URL}/search?{urlencode(params)}"
+
     def _search_sync(self, query: str, num_results: int = 10) -> List[SearchItem]:
         """
         Synchronous Bing search implementation to retrieve search results.
@@ -58,9 +80,17 @@ class BingSearchEngine(WebSearchEngine):
         if not query:
             return []
 
+        # Prefer official Bing Web Search API if configured
+        scfg = getattr(config, "search_config", None)
+        use_api = bool(getattr(scfg, "bing_use_api", False)) if scfg else False
+        if use_api and getattr(scfg, "bing_api_key", None):
+            api_results = self._search_api(query, num_results=num_results)
+            if api_results:
+                return api_results[:num_results]
+
         list_result = []
         first = 1
-        next_url = BING_SEARCH_URL + query
+        next_url = self._build_search_url(query)
 
         while len(list_result) < num_results:
             data, next_url = self._parse_html(
@@ -74,6 +104,38 @@ class BingSearchEngine(WebSearchEngine):
 
         return list_result[:num_results]
 
+    def _search_api(self, query: str, num_results: int = 10) -> List[SearchItem]:
+        scfg = getattr(config, "search_config", None)
+        if not scfg or not getattr(scfg, "bing_api_key", None):
+            return []
+        endpoint = getattr(scfg, "bing_api_endpoint", None) or "https://api.bing.microsoft.com/v7.0/search"
+        params = {"q": query, "count": min(50, max(1, num_results))}
+        # Locale/safety
+        if getattr(scfg, "bing_mkt", None):
+            params["mkt"] = scfg.bing_mkt
+        if getattr(scfg, "bing_safesearch", None):
+            params["safeSearch"] = scfg.bing_safesearch  # Off|Moderate|Strict
+        headers = {"Ocp-Apim-Subscription-Key": scfg.bing_api_key}
+        try:
+            r = self.session.get(endpoint, params=params, headers=headers, timeout=12)
+            if r.status_code != 200:
+                logger.warning(f"Bing API non-200: {r.status_code} {r.text[:200]}")
+                return []
+            data = r.json()
+            values = (data.get("webPages") or {}).get("value") or []
+            out: List[SearchItem] = []
+            for i, v in enumerate(values):
+                name = v.get("name") or f"Bing Result {i+1}"
+                url = v.get("url") or ""
+                snippet = v.get("snippet") or ""
+                out.append(SearchItem(title=name, url=url, description=snippet))
+                if len(out) >= num_results:
+                    break
+            return out
+        except Exception as e:
+            logger.warning(f"Bing API failed: {e}")
+            return []
+
     def _parse_html(
         self, url: str, rank_start: int = 0, first: int = 1
     ) -> Tuple[List[SearchItem], str]:
@@ -84,6 +146,12 @@ class BingSearchEngine(WebSearchEngine):
             tuple: (List of SearchItem objects, next page URL or None)
         """
         try:
+            # Update Accept-Language from config if present
+            scfg = getattr(config, "search_config", None)
+            if scfg and getattr(scfg, "lang", None):
+                lang = scfg.lang
+                country = getattr(scfg, "country", "")
+                self.session.headers["Accept-Language"] = f"{lang}-{country},{lang};q=0.9"
             res = self.session.get(url=url)
             res.encoding = "utf-8"
             root = BeautifulSoup(res.text, "lxml")

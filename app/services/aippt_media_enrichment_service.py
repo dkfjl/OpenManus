@@ -17,7 +17,7 @@ async def enrich_media_outline(
 
     Steps:
       1) Normalize layout so each transition has exactly 3 content slides.
-      2) Append an image (via remote URL) to the first content of each transition.
+      2) Append up to two images (via remote URLs) to the first content of each transition.
       3) Append a table (via LLM) to the second content of each transition.
     """
     language = language or "zh"

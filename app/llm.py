@@ -31,9 +31,9 @@ from app.schema import (
 )
 from app.services.execution_log_service import log_execution_event
 
-
 REASONING_MODELS = ["o1", "o3-mini"]
 MULTIMODAL_MODELS = [
+    "qwen-max",
     "gpt-4-vision-preview",
     "gpt-4o",
     "gpt-4o-mini",
@@ -603,9 +603,7 @@ class LLM:
             multimodal_content = (
                 [{"type": "text", "text": content}]
                 if isinstance(content, str)
-                else content
-                if isinstance(content, list)
-                else []
+                else content if isinstance(content, list) else []
             )
 
             # Add images to content
@@ -844,7 +842,10 @@ class LLM:
 
             tool_names = []
             if response.choices[0].message.tool_calls:
-                tool_names = [call.function.name for call in response.choices[0].message.tool_calls]
+                tool_names = [
+                    call.function.name
+                    for call in response.choices[0].message.tool_calls
+                ]
 
             log_execution_event(
                 "llm_call",

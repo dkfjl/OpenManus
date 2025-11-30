@@ -58,6 +58,89 @@ class SearchSettings(BaseModel):
         default="us",
         description="Country code for search results (e.g., us, cn, uk)",
     )
+    # Per-engine retry attempts (exceptions in a single engine)
+    engine_attempts: int = Field(
+        default=1, description="Attempts per engine before moving to next engine"
+    )
+    engine_retry_min_delay: int = Field(
+        default=1, description="Min backoff seconds between per-engine attempts"
+    )
+    engine_retry_max_delay: int = Field(
+        default=5, description="Max backoff seconds between per-engine attempts"
+    )
+    # DuckDuckGo specific
+    ddg_region: Optional[str] = Field(
+        default=None,
+        description="DuckDuckGo region code (e.g., wt-wt, cn-zh). If None, DDG default is used.",
+    )
+    ddg_safesearch: Optional[str] = Field(
+        default=None, description="DuckDuckGo safesearch: off|moderate|strict"
+    )
+    ddg_timelimit: Optional[str] = Field(
+        default=None, description="DuckDuckGo time limit: d|w|m|y (optional)"
+    )
+    ddg_backend: Optional[str] = Field(
+        default="api", description="DuckDuckGo backend: api|html|lite"
+    )
+    # Optional: Use an external DuckDuckGo API (e.g., RapidAPI proxy)
+    ddg_use_api: bool = Field(
+        default=False, description="Use configured DuckDuckGo API instead of built-in backends"
+    )
+    ddg_api_key: Optional[str] = Field(
+        default=None, description="API key for DDG external API (e.g., RapidAPI)"
+    )
+    ddg_api_endpoint: Optional[str] = Field(
+        default="https://duckduckgo10.p.rapidapi.com/search",
+        description="DuckDuckGo API endpoint URL",
+    )
+    ddg_api_host: Optional[str] = Field(
+        default="duckduckgo10.p.rapidapi.com",
+        description="DuckDuckGo API host header (for RapidAPI)",
+    )
+    # Bing specific
+    bing_mkt: Optional[str] = Field(
+        default=None, description="Bing market (e.g., en-US, zh-CN)."
+    )
+    bing_cc: Optional[str] = Field(default=None, description="Bing country code (e.g., US, CN)")
+    bing_lang: Optional[str] = Field(default=None, description="Bing language code (e.g., en, zh-CN)")
+    bing_safesearch: Optional[str] = Field(
+        default=None, description="Bing safe search (adlt): off|moderate|strict"
+    )
+    # Optional: Use official Bing Web Search API instead of HTML scraping
+    bing_use_api: bool = Field(
+        default=False,
+        description="Use Bing Web Search API when true; otherwise scrape web UI",
+    )
+    bing_api_key: Optional[str] = Field(
+        default=None, description="Bing Web Search API key (Azure Cognitive Services)"
+    )
+    bing_api_endpoint: Optional[str] = Field(
+        default="https://api.bing.microsoft.com/v7.0/search",
+        description="Bing Web Search API endpoint",
+    )
+
+class ImageSearchSettings(BaseModel):
+    provider_priority: List[str] = Field(
+        default_factory=lambda: ["google_cse", "playwright"],
+        description="Order of providers to try for image search",
+    )
+    # Google Custom Search (Image) settings
+    google_api_key: Optional[str] = Field(
+        default=None, description="Google Custom Search API key"
+    )
+    google_cx: Optional[str] = Field(
+        default=None, description="Google Custom Search Engine ID (cx)"
+    )
+    google_endpoint: Optional[str] = Field(
+        default="https://www.googleapis.com/customsearch/v1",
+        description="Google Custom Search endpoint",
+    )
+    google_safe: str = Field("medium", description="Google safe search: off|medium|high")
+    # Legacy Bing fields kept for backward compatibility (not used if provider_priority excludes bing)
+    bing_api_key: Optional[str] = None
+    bing_endpoint: Optional[str] = "https://api.bing.microsoft.com/v7.0/images/search"
+    market: str = "en-US"
+    safe_search: str = "Moderate"
 
 
 class RunflowSettings(BaseModel):
@@ -269,6 +352,9 @@ class AppConfig(BaseModel):
         default_factory=KnowledgeBaseSettings,
         description="Vector knowledge base configuration",
     )
+    image_search_config: Optional[ImageSearchSettings] = Field(
+        None, description="Image search configuration"
+    )
 
     class Config:
         arbitrary_types_allowed = True
@@ -366,6 +452,11 @@ class Config:
         search_settings = None
         if search_config:
             search_settings = SearchSettings(**search_config)
+
+        image_search_cfg = raw_config.get("image_search", {})
+        image_search_settings = None
+        if image_search_cfg:
+            image_search_settings = ImageSearchSettings(**image_search_cfg)
         sandbox_config = raw_config.get("sandbox", {})
         if sandbox_config:
             sandbox_settings = SandboxSettings(**sandbox_config)
@@ -423,6 +514,7 @@ class Config:
             "aippt_config": aippt_settings,
             "document_config": document_settings,
             "knowledge_base_config": knowledge_base_settings,
+            "image_search_config": image_search_settings,
         }
 
         self._config = AppConfig(**config_dict)
@@ -446,6 +538,10 @@ class Config:
     @property
     def search_config(self) -> Optional[SearchSettings]:
         return self._config.search_config
+
+    @property
+    def image_search_config(self) -> Optional[ImageSearchSettings]:
+        return self._config.image_search_config
 
     @property
     def mcp_config(self) -> MCPSettings:

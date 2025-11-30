@@ -21,25 +21,32 @@ class BaiduSearchEngine(WebSearchEngine):
         for i, item in enumerate(raw_results):
             if isinstance(item, str):
                 # If it's just a URL
-                results.append(
-                    SearchItem(title=f"Baidu Result {i+1}", url=item, description=None)
-                )
+                url = str(item)
+                if url.startswith("/"):
+                    url = "https://www.baidu.com" + url
+                results.append(SearchItem(title=f"Baidu Result {i+1}", url=url, description=None))
             elif isinstance(item, dict):
                 # If it's a dictionary with details
+                url = item.get("url", "") or ""
+                if isinstance(url, str) and url.startswith("/"):
+                    url = "https://www.baidu.com" + url
                 results.append(
                     SearchItem(
                         title=item.get("title", f"Baidu Result {i+1}"),
-                        url=item.get("url", ""),
+                        url=url,
                         description=item.get("abstract", None),
                     )
                 )
             else:
                 # Try to get attributes directly
                 try:
+                    url = getattr(item, "url", "") or ""
+                    if isinstance(url, str) and url.startswith("/"):
+                        url = "https://www.baidu.com" + url
                     results.append(
                         SearchItem(
                             title=getattr(item, "title", f"Baidu Result {i+1}"),
-                            url=getattr(item, "url", ""),
+                            url=url,
                             description=getattr(item, "abstract", None),
                         )
                     )

@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 import requests
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from tenacity import retry, stop_after_attempt, wait_exponential
+ # removed tenacity-based decorator for configurable attempts
 
 from app.config import config
 from app.logger import logger
@@ -123,6 +123,15 @@ class WebContentFetcher:
         }
 
         try:
+            # Normalize problematic URLs (e.g., Baidu relative links or redirect stubs)
+            from urllib.parse import urlparse
+            if url.startswith("/s?"):
+                url = "https://www.baidu.com" + url
+            parsed = urlparse(url)
+            # Skip fetching Baidu search/redirect pages that often block or are not content
+            if parsed.netloc.endswith("baidu.com") and parsed.path.startswith(("/s", "/link")):
+                logger.debug(f"Skip fetching content from Baidu utility URL: {url}")
+                return None
             # Use asyncio to run requests in a thread pool
             response = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: requests.get(url, headers=headers, timeout=timeout)
@@ -364,29 +373,22 @@ class WebSearch(BaseTool):
             if config.search_config
             else "google"
         )
-        fallbacks = (
-            [engine.lower() for engine in config.search_config.fallback_engines]
-            if config.search_config
-            and hasattr(config.search_config, "fallback_engines")
-            else []
-        )
+        fallbacks = []
+        if config.search_config and hasattr(config.search_config, "fallback_engines"):
+            fallbacks = [engine.lower() for engine in (config.search_config.fallback_engines or [])]
 
-        # Start with preferred engine, then fallbacks, then remaining engines
+        # Start with preferred engine, then explicitly configured fallbacks only
         engine_order = [preferred] if preferred in self._search_engine else []
-        engine_order.extend(
-            [
-                fb
-                for fb in fallbacks
-                if fb in self._search_engine and fb not in engine_order
-            ]
-        )
-        engine_order.extend([e for e in self._search_engine if e not in engine_order])
+        for fb in fallbacks:
+            if fb in self._search_engine and fb not in engine_order:
+                engine_order.append(fb)
+
+        # If no engines resolved (e.g., bad config), fall back to a safe default order
+        if not engine_order:
+            engine_order = [e for e in ["google", "duckduckgo", "bing", "baidu"] if e in self._search_engine]
 
         return engine_order
 
-    @retry(
-        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10)
-    )
     async def _perform_search_with_engine(
         self,
         engine: WebSearchEngine,
@@ -394,18 +396,43 @@ class WebSearch(BaseTool):
         num_results: int,
         search_params: Dict[str, Any],
     ) -> List[SearchItem]:
-        """Execute search with the given engine and parameters."""
-        return await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: list(
-                engine.perform_search(
-                    query,
-                    num_results=num_results,
-                    lang=search_params.get("lang"),
-                    country=search_params.get("country"),
+        """Execute search with the given engine and parameters, with configurable attempts."""
+        attempts = 1
+        min_delay = 1
+        max_delay = 5
+        try:
+            scfg = config.search_config
+            if scfg and getattr(scfg, "engine_attempts", None):
+                attempts = max(1, int(scfg.engine_attempts))
+            if scfg and getattr(scfg, "engine_retry_min_delay", None):
+                min_delay = max(0, int(scfg.engine_retry_min_delay))
+            if scfg and getattr(scfg, "engine_retry_max_delay", None):
+                max_delay = max(0, int(scfg.engine_retry_max_delay))
+        except Exception:
+            attempts = 1
+
+        for attempt in range(attempts):
+            try:
+                return await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: list(
+                        engine.perform_search(
+                            query,
+                            num_results=num_results,
+                            lang=search_params.get("lang"),
+                            country=search_params.get("country"),
+                        )
+                    ),
                 )
-            ),
-        )
+            except Exception:
+                if attempt < attempts - 1:
+                    try:
+                        # simple exponential backoff within configured bounds
+                        delay = min(max_delay, max(min_delay, min_delay * (2 ** attempt)))
+                        await asyncio.sleep(delay)
+                    except Exception:
+                        pass
+        return []
 
 
 if __name__ == "__main__":

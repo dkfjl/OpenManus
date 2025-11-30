@@ -20,6 +20,7 @@ from pptx.util import Inches, Pt
 from app.config import config
 from app.logger import logger
 from app.services.execution_log_service import log_execution_event
+from PIL import Image
 
 
 class AIPPTToPPTXService:
@@ -881,17 +882,53 @@ class AIPPTToPPTXService:
 
         # 插入图片（variant==2 留白，不插入媒体）
         cursor_top = right_top
-        for img in image_items[:2] if right_w > 0 else []:  # 控制数量，避免过度拥挤
+        imgs = image_items[:2] if right_w > 0 else []
+
+        def _measure_scaled_height(src, target_w: int) -> int:
+            try:
+                if isinstance(src, io.BytesIO):
+                    src.seek(0)
+                    with Image.open(src) as im:
+                        w, h = im.size
+                elif isinstance(src, str):
+                    with Image.open(src) as im:
+                        w, h = im.size
+                else:
+                    return 0
+                if w <= 0 or h <= 0:
+                    return 0
+                scale = float(target_w) / float(w)
+                return int(h * scale)
+            except Exception:
+                return 0
+
+        # 预估需要的高度并在两张图时进行自适应缩放，确保不越界
+        measured: List[Tuple[io.BytesIO | str | None, str, int]] = []  # (src, hint, est_height)
+        spacing = Inches(0.2)
+        for img in imgs:
             pic_src, hint = _resolve_image_source(img)
-            title = img.get("title") or "图片"
-            caption = img.get("caption") or hint
+            est_h = _measure_scaled_height(pic_src, int(right_w)) if pic_src is not None else 0
+            measured.append((pic_src, hint, est_h))
+
+        # 如果两张图高度总和超过可用高度，则按比例缩小宽度
+        if len(measured) == 2 and right_w > 0:
+            avail_h = int(block_h)
+            total_h = sum(max(0, h) for _, _, h in measured) + int(spacing)
+            if total_h > avail_h and total_h > 0:
+                scale = max(0.3, float(avail_h - int(spacing)) / float(total_h))
+                right_w = int(right_w * scale)
+
+        # 底线：不允许超出右侧可用块的底部
+        max_bottom = int(right_top + block_h)
+
+        for pic_src, hint, _ in measured:
+            title = "图片"
+            caption = hint
             try:
                 if pic_src is None:
-                    # 回退为文本提示
                     if len(slide.placeholders) > 1:
                         tf = slide.placeholders[1].text_frame
                         p = tf.add_paragraph()
-                        # 不使用项目符号
                         p.text = f"{title}: {caption}"
                         p.font.size = Pt(18)
                         p.level = 0
@@ -904,9 +941,16 @@ class AIPPTToPPTXService:
                     pic = slide.shapes.add_picture(
                         pic_src, right_left, cursor_top, width=int(right_w)
                     )
-                    cursor_top = min(
-                        cursor_top + pic.height + Inches(0.2), int(slide_h - block_h)
-                    )
+                    cursor_top = cursor_top + pic.height + int(spacing)
+                    if cursor_top > max_bottom:
+                        # 超界时，将图片顶到下边界，并停止继续插入
+                        overflow = cursor_top - max_bottom
+                        # 简单纠偏：上移超出的距离（不重新缩放，避免二次质量损失）
+                        try:
+                            pic.top = max(right_top, pic.top - overflow)
+                        except Exception:
+                            pass
+                        break
             except Exception as e:
                 logger.warning(f"Failed to add image to slide: {e}")
 

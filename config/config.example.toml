@@ -79,10 +79,10 @@ temperature = 0.0                          # Controls randomness for vision mode
 
 # Optional configuration, Search settings.
 # [search]
-# Search engine for agent to use. Default is "Google", can be set to "Baidu" or "DuckDuckGo" or "Bing".
-#engine = "Google"
-# Fallback engine order. Default is ["DuckDuckGo", "Baidu", "Bing"] - will try in this order after primary engine fails.
-#fallback_engines = ["DuckDuckGo", "Baidu", "Bing"]
+# Search engine for agent to use. Options: "Google" | "DuckDuckGo" | "Bing" | "Baidu".
+# engine = "Google"
+# Explicit fallback order. When set, ONLY these engines are tried after the primary.
+# fallback_engines = ["DuckDuckGo", "Bing"]
 # Seconds to wait before retrying all engines again when they all fail due to rate limits. Default is 60.
 #retry_delay = 60
 # Maximum number of times to retry all engines when all fail. Default is 3.
@@ -91,6 +91,46 @@ temperature = 0.0                          # Controls randomness for vision mode
 #lang = "en"
 # Country code for search results. Options: "us" (United States), "cn" (China), etc.
 #country = "us"
+
+# DuckDuckGo parameters (optional)
+# Examples: region: wt-wt (worldwide), us-en, cn-zh; safesearch: off|moderate|strict; timelimit: d|w|m|y
+# ddg_region = "wt-wt"
+# ddg_safesearch = "moderate"
+# ddg_timelimit = ""
+# ddg_backend = "api"  # api|html|lite
+# Optional: Use external DuckDuckGo API (e.g., RapidAPI)
+# ddg_use_api = false
+# ddg_api_key = "YOUR_RAPIDAPI_KEY"
+# ddg_api_endpoint = "https://duckduckgo10.p.rapidapi.com/search"
+# ddg_api_host = "duckduckgo10.p.rapidapi.com"
+
+# Bing parameters (optional)
+# Market and localization: mkt (en-US, zh-CN), cc (US, CN), lang (en, zh-CN)
+# SafeSearch: off|moderate|strict
+# bing_mkt = "en-US"
+# bing_cc = "US"
+# bing_lang = "en"
+# bing_safesearch = "moderate"
+
+# Use official Bing Web Search API (optional)
+# bing_use_api = false
+# bing_api_key = "YOUR_BING_WEB_SEARCH_KEY"
+# bing_api_endpoint = "https://api.bing.microsoft.com/v7.0/search"
+
+# Optional configuration, Image search settings.
+#[image_search]
+# provider_priority = ["google_cse", "playwright"]
+# google_api_key = "YOUR_GOOGLE_API_KEY"   # Required for Google CSE
+# google_cx = "YOUR_GOOGLE_CSE_CX"         # Custom Search Engine ID
+# google_endpoint = "https://www.googleapis.com/customsearch/v1"
+# google_safe = "medium"                    # off | medium | high
+#
+# # (Optional legacy) If you want to use Bing instead:
+# # provider_priority = ["bing_api", "playwright"]
+# # bing_api_key = "YOUR_BING_IMAGE_SEARCH_KEY"
+# # bing_endpoint = "https://api.bing.microsoft.com/v7.0/images/search"
+# # market = "en-US"
+# # safe_search = "Moderate"                # Off | Moderate | Strict
 
 
 ## Sandbox configuration
