@@ -12,8 +12,7 @@ from app.logger import logger
 from app.schema import Message
 from app.services.execution_log_service import log_execution_event
 from app.services.image_retrieval_service import (
-    discover_image_urls,
-    discover_image_urls_with_refine,
+    discover_image_assets_with_refine,
 )
 
 
@@ -281,9 +280,10 @@ async def enrich_images_for_outline(
             # Strategy: up to 3 attempts — refine → search → relevance multi-select
             attempts = 0
             while attempts < 3:
-                urls = await discover_image_urls_with_refine(
-                    topic=topic, section=sec_title, point=point_title, language=language, desired=2, max_attempts=3
+                assets = await discover_image_assets_with_refine(
+                    topic=topic, section=sec_title, point=point_title, language=language, desired=3, max_attempts=3
                 )
+                urls = [a.url for a in assets]
                 chosen_list = await _filter_relevant_images_multi(
                     topic=topic,
                     section=sec_title,
@@ -296,7 +296,19 @@ async def enrich_images_for_outline(
                     keep = chosen_list[:2]
                     for idx, u in enumerate(keep, start=1):
                         title = point_title if len(keep) == 1 else f"{point_title} ({idx})"
-                        items.append({"type": "image", "url": u, "title": title})
+                        # 找到对应的来源页，作为下载时的 Referer
+                        ref = None
+                        try:
+                            for a in assets:
+                                if a.url == u:
+                                    ref = a.source
+                                    break
+                        except Exception:
+                            ref = None
+                        img_item = {"type": "image", "url": u, "title": title}
+                        if ref:
+                            img_item["referer"] = ref
+                        items.append(img_item)
                     count_added += 1
                     break
                 attempts += 1

@@ -438,6 +438,55 @@ async def discover_image_urls(query: str, max_images: int = 4) -> List[str]:
     return urls
 
 
+async def discover_image_assets(query: str, max_images: int = 4) -> List[ImageCandidate]:
+    """Like discover_image_urls but returns ImageCandidate objects with source info.
+
+    Used when downstream needs per-URL referer (to bypass hotlinking).
+    """
+    log_execution_event(
+        "image_discovery",
+        "start_assets",
+        {"query": query, "max": max_images},
+    )
+    candidates: List[ImageCandidate] = await _discover_with_playwright_fallback(
+        query, count=max_images * 6
+    )
+    if not candidates:
+        log_execution_event("image_discovery", "no_candidates_assets", {"query": query})
+        return []
+    verified = await _verify_candidates(candidates, max_images)
+    if not verified:
+        return []
+    picked = _rank_candidates(verified, query=query, limit=max_images)
+    return picked
+
+
+async def discover_image_assets_with_refine(
+    *, topic: str, section: str, point: str, language: Optional[str] = None, desired: int = 2, max_attempts: int = 3
+) -> List[ImageCandidate]:
+    base_query = " ".join(x for x in [topic, section, point] if x)
+    seen: Set[str] = set()
+    results: List[ImageCandidate] = []
+    temps = [0.2, 0.4, 0.7]
+    for attempt in range(max_attempts):
+        temp = temps[attempt] if attempt < len(temps) else temps[-1]
+        refined = await refine_image_queries(
+            topic=topic, section=section, point=point, language=language, max_variants=3, temperature=temp
+        )
+        queries = refined + [base_query]
+        for q in queries:
+            assets = await discover_image_assets(q, max_images=max(desired * 2, 4))
+            for c in assets:
+                if c.url not in seen:
+                    seen.add(c.url)
+                    results.append(c)
+            if len(results) >= desired * 2:
+                break
+        if len(results) >= desired:
+            break
+    return results
+
+
 async def refine_image_queries(
     *, topic: str, section: str, point: str, language: Optional[str] = None, max_variants: int = 3, temperature: float = 0.2
 ) -> List[str]:

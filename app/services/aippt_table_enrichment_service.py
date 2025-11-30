@@ -57,16 +57,16 @@ async def _gen_table_via_llm(
     is_zh = (language or "zh").lower().startswith("zh")
     lang_note = "请用中文" if is_zh else "Please answer in English"
     prompt = (
-        f"{lang_note}。基于主题/章节/要点与提供的文字内容，并结合外部检索事实external_facts，生成一个适合幻灯片展示且以数字为主的精简表格。\n"
+        f"{lang_note}。基于主题/章节/要点与提供的文字内容，并结合外部检索事实external_facts，生成一个适合幻灯片展示且以数字为主的精简表格（如必要可做合理估计）。\n"
         f"主题: {topic}\n章节: {section}\n要点: {point}\n"
         f"text: {text[:600]}\ncase: {case[:600]}\n"
         f"external_facts: {external_facts[:2000]}\n\n"
         "严格要求：\n"
-        "1) 只返回 JSON 对象：{\"headers\":[..3~4..], \"rows\":[[...],[...]]}，不要任何额外文字；优先使用 external_facts 中的可信数字。\n"
-        "2) 列数 3~4，行数 3~5。\n"
-        "3) 单元格尽量包含数字（数量/百分比/区间/年份/金额/指标值），至少一半以上单元格含有阿拉伯数字。\n"
-        "4) 每个单元格极短：中文≤12字；英文≤12 chars；禁止换行/标点说明。\n"
-        "5) 尽量避免 '-' 或 'N/A'；仅当 external_facts 无法提供任何有效数值时才使用。\n"
+        '1) 只返回 JSON 对象：{"headers":[..3~4..], "rows":[[...],[...]], "note":"(可选)若含估计/不确定性，请在此备注"}，不要任何额外文字；优先使用 external_facts 中的可信数字。\n'
+        "2) 列数 3~4，行数 3~5；不得返回空行/空列。\n"
+        "3) 绝大多数单元格包含数字（数量/百分比/区间/年份/金额/指标值），≥80%。\n"
+        "4) 每格极短：中文≤12字；英文≤12 chars；禁止换行和长注释。\n"
+        "5) 禁止空白单元格；若确无数据，给出合理区间或估计值（如 10~12 或 ≈8.5），并在 note 里简述假设。\n"
         "6) 表头清晰，如 维度/指标/值/同比 或 Dimension/Metric/Value/YoY。\n"
     )
     llm = LLM()
@@ -83,7 +83,9 @@ async def _gen_table_via_llm(
     if not isinstance(obj, dict):
         # fallback or retry
         if _attempt >= _max_attempts:
-            headers = ["维度", "指标", "值"] if is_zh else ["Dimension", "Metric", "Value"]
+            headers = (
+                ["维度", "指标", "值"] if is_zh else ["Dimension", "Metric", "Value"]
+            )
             rows = [[section[:12], point[:12], "-"]] * 3
             return {"headers": headers, "rows": rows}
         return await _gen_table_via_llm(
@@ -100,6 +102,7 @@ async def _gen_table_via_llm(
 
     headers = obj.get("headers") or []
     rows = obj.get("rows") or []
+    note = obj.get("note") or ""
     # Clamp sizes
     try:
         headers = [str(h)[:20] for h in headers][:4]
@@ -119,7 +122,9 @@ async def _gen_table_via_llm(
                 if is_zh
                 else "Compress this table to numeric: keep 3-4 cols, 3-5 rows, most cells contain digits; <=12 chars; JSON only."
             )
-            tbl_json = json.dumps({"headers": headers, "rows": rows}, ensure_ascii=False)
+            tbl_json = json.dumps(
+                {"headers": headers, "rows": rows}, ensure_ascii=False
+            )
             llm2 = LLM()
             resp2 = await llm2.ask(
                 [
@@ -148,7 +153,9 @@ async def _gen_table_via_llm(
             pass
     if not headers or not rows:
         if _attempt >= _max_attempts:
-            headers = ["维度", "指标", "值"] if is_zh else ["Dimension", "Metric", "Value"]
+            headers = (
+                ["维度", "指标", "值"] if is_zh else ["Dimension", "Metric", "Value"]
+            )
             rows = [[section[:12], point[:12], "-"]] * 3
             return {"headers": headers, "rows": rows}
         return await _gen_table_via_llm(
@@ -162,7 +169,8 @@ async def _gen_table_via_llm(
             _attempt=_attempt + 1,
             _max_attempts=_max_attempts,
         )
-    return {"headers": headers, "rows": rows}
+    return {"headers": headers, "rows": rows, "note": note}
+
 
 async def _gather_external_facts(
     *, topic: str, section: str, point: str, language: str, num_results: int = 6
@@ -170,12 +178,15 @@ async def _gather_external_facts(
     """Gather short factual snippets via WebSearch. Returns facts text and source URLs."""
     try:
         from app.tool.web_search import WebSearch
+
         ws = WebSearch()
         q = " ".join(x for x in [topic, section, point] if x)
-        res = await ws.execute(query=q, num_results=min(8, max(3, num_results)), fetch_content=True)
+        res = await ws.execute(
+            query=q, num_results=min(8, max(3, num_results)), fetch_content=True
+        )
         facts: List[str] = []
         urls: List[str] = []
-        for r in res.results[: num_results]:
+        for r in res.results[:num_results]:
             snippet = (r.raw_content or r.description or "")[:600].replace("\n", " ")
             title = (r.title or "").strip()[:80]
             facts.append(f"- {title}: {snippet}")
@@ -185,6 +196,7 @@ async def _gather_external_facts(
     except Exception as e:
         logger.warning(f"external facts gather failed: {e}")
         return "", []
+
 
 def _placeholder_ratio(headers: List[str], rows: List[List[str]]) -> float:
     total = max(1, sum(len(r) for r in rows))
@@ -196,8 +208,16 @@ def _placeholder_ratio(headers: List[str], rows: List[List[str]]) -> float:
                 bad += 1
     return bad / total
 
+
 async def _revise_content_to_match_table(
-    *, topic: str, section: str, point: str, language: str, old_text: str, headers: List[str], rows: List[List[str]]
+    *,
+    topic: str,
+    section: str,
+    point: str,
+    language: str,
+    old_text: str,
+    headers: List[str],
+    rows: List[List[str]],
 ) -> str:
     is_zh = (language or "zh").lower().startswith("zh")
     lang_note = "请用中文" if is_zh else "Please use English"
@@ -207,13 +227,22 @@ async def _revise_content_to_match_table(
         if is_zh
         else "Summarize 2-4 concise bullets consistent with this table without changing the topic/section/point. Return the merged text only, one bullet per line."
     )
-    prompt = (
-        f"{base}\nTopic: {topic}\nSection: {section}\nPoint: {point}\nCurrent text: {old_text[:400]}\nTable JSON: {table_preview}"
-    )
+    prompt = f"{base}\nTopic: {topic}\nSection: {section}\nPoint: {point}\nCurrent text: {old_text[:400]}\nTable JSON: {table_preview}"
     llm = LLM()
     try:
-        resp = await llm.ask([Message.user_message(prompt)], stream=False, temperature=0.2)
-        return resp.strip()
+        resp = await llm.ask(
+            [Message.user_message(prompt)], stream=False, temperature=0.2
+        )
+        lines = [ln.strip() for ln in resp.strip().splitlines() if ln.strip()]
+        # 限制 3 行以内，每行适度裁剪，避免左栏过长
+        is_zh = (language or "zh").lower().startswith("zh")
+        max_len = 32 if is_zh else 120  # 约等于 2 行中文或 1 行英文
+        trimmed = []
+        for ln in lines[:3]:
+            if len(ln) > max_len:
+                ln = ln[: max_len - 1] + "…"
+            trimmed.append(ln)
+        return "\n".join(trimmed) if trimmed else resp.strip()
     except Exception:
         return old_text
 
@@ -261,7 +290,11 @@ async def enrich_tables_for_outline(
             try:
                 # Step A: gather external facts
                 facts, sources = await _gather_external_facts(
-                    topic=topic, section=sec_title, point=point_title, language=language, num_results=6
+                    topic=topic,
+                    section=sec_title,
+                    point=point_title,
+                    language=language,
+                    num_results=6,
                 )
 
                 # Step B: generate table using content + external facts
@@ -276,11 +309,16 @@ async def enrich_tables_for_outline(
                 )
 
                 headers, rows = tbl.get("headers") or [], tbl.get("rows") or []
+                note = tbl.get("note") or ""
 
                 # Step B2: If too many placeholders, broaden search and retry once
                 if _placeholder_ratio(headers, rows) > 0.25:
                     facts2, _ = await _gather_external_facts(
-                        topic=topic, section=sec_title, point=point_title, language=language, num_results=8
+                        topic=topic,
+                        section=sec_title,
+                        point=point_title,
+                        language=language,
+                        num_results=8,
                     )
                     tbl = await _gen_table_via_llm(
                         topic=topic,
@@ -294,9 +332,10 @@ async def enrich_tables_for_outline(
                         _max_attempts=2,
                     )
                     headers, rows = tbl.get("headers") or [], tbl.get("rows") or []
+                    note = tbl.get("note") or note
 
                 # Step C: append table
-                items.append({"type": "table", "headers": headers, "rows": rows})
+                items.append({"type": "table", "headers": headers, "rows": rows, "note": note})
 
                 # Step D: revise text bullets to match table (do not change topic)
                 new_text = await _revise_content_to_match_table(
@@ -321,7 +360,7 @@ async def enrich_tables_for_outline(
                 count_added += 1
             except Exception as e:
                 logger.warning(f"Table enrichment failed for section {sec_title}: {e}")
-        i = max(i + 1, j if 'j' in locals() else i + 1)
+        i = max(i + 1, j if "j" in locals() else i + 1)
 
     log_execution_event(
         "aippt_media_table",
