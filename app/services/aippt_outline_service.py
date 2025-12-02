@@ -110,7 +110,7 @@ async def generate_aippt_outline(
 - slides 数组必须按顺序： cover → contents → (transition + N * content)+ → end
   - 其中每个 contents.items 中的章节数（4或5）与后续 transition 的数量一致；
   - 对于每个 transition，其后应至少跟随 1 个 content（通常 3 个 content 对应 transition.items 的 3 要点）；但总体上，每个目录项应对应一组 transition + 至少 1 content。
-- contents.items 的长度必须是 4 或 5（严格）。
+- contents.items 的长度必须是 5（严格）。
 - 每个 transition.items 必须有且恰好 3 个要点字符串。
 - 每个 content.data.items 必须恰好包含 1 个对象，包含 title、text、case 三个字段。
 - 所有 text/case 字段长度限制请遵守上面说明。
@@ -432,7 +432,9 @@ def _enforce_toc_alignment(outline: List[dict], topic: str) -> List[dict]:
                     if len(items) >= 1:
                         cdata["items"] = items[:1]
                     else:
-                        cdata["items"] = [{"title": f"{item} - 要点{j}", "text": "", "case": ""}]
+                        cdata["items"] = [
+                            {"title": f"{item} - 要点{j}", "text": "", "case": ""}
+                        ]
                 it = cdata["items"][0]
                 t = (it.get("title") or "").strip() if isinstance(it, dict) else str(it)
                 titles.append(t or f"要点{j}")
@@ -441,10 +443,19 @@ def _enforce_toc_alignment(outline: List[dict], topic: str) -> List[dict]:
 
         # Transition with exactly 3 titles
         if len(titles) < 3:
-            titles = titles + [titles[-1]] * (3 - len(titles)) if titles else ["要点1", "要点2", "要点3"]
+            titles = (
+                titles + [titles[-1]] * (3 - len(titles))
+                if titles
+                else ["要点1", "要点2", "要点3"]
+            )
         titles = titles[:3]
         t_text = "；".join(titles)
-        new_outline.append({"type": "transition", "data": {"title": item, "items": titles, "text": t_text}})
+        new_outline.append(
+            {
+                "type": "transition",
+                "data": {"title": item, "items": titles, "text": t_text},
+            }
+        )
         new_outline.extend(group)
 
     if end_slide is None:
@@ -459,19 +470,34 @@ def _create_fallback_outline(topic: str, language: str) -> List[dict]:
     if language == "zh":
         toc = ["概述", "主体", "扩展", "总结"]
         slides: List[dict] = []
-        slides.append({"type": "cover", "data": {"title": topic, "text": "自动生成的演示文稿"}})
+        slides.append(
+            {"type": "cover", "data": {"title": topic, "text": "自动生成的演示文稿"}}
+        )
         slides.append({"type": "contents", "data": {"items": toc[:5]}})
         for sec in toc[:5]:
             t_items = ["要点1", "要点2", "要点3"]
-            slides.append({"type": "transition", "data": {"title": sec, "items": t_items, "text": "；".join(t_items)}})
-            for k in range(3):
-                slides.append({
-                    "type": "content",
+            slides.append(
+                {
+                    "type": "transition",
                     "data": {
                         "title": sec,
-                        "items": [{"title": t_items[k], "text": "简要说明", "case": ""}],
+                        "items": t_items,
+                        "text": "；".join(t_items),
                     },
-                })
+                }
+            )
+            for k in range(3):
+                slides.append(
+                    {
+                        "type": "content",
+                        "data": {
+                            "title": sec,
+                            "items": [
+                                {"title": t_items[k], "text": "简要说明", "case": ""}
+                            ],
+                        },
+                    }
+                )
         slides.append({"type": "end", "data": {}})
         return slides
 

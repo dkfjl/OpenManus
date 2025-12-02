@@ -6,10 +6,12 @@ AIPPTSlide 到 PPTX 的转换服务
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 from PIL import Image
@@ -42,6 +44,27 @@ class AIPPTToPPTXService:
             "text": RGBColor(33, 33, 33),  # 曜石黑 (Obsidian)
             "accent": RGBColor(198, 168, 105),  # 香槟金 (Champagne Gold)
             "secondary": RGBColor(70, 130, 180),  # 钢蓝辅助
+        },
+        "翡翠森绿": {
+            "primary": RGBColor(0, 85, 46),  # 深森林绿
+            "background": RGBColor(250, 252, 250),  # 极简白 (微绿)
+            "text": RGBColor(33, 33, 33),
+            "accent": RGBColor(198, 168, 105),  # 香槟金
+            "secondary": RGBColor(60, 179, 113),  # 春绿辅助
+        },
+        "丹砂赤红": {
+            "primary": RGBColor(102, 0, 0),  # 勃艮第深红
+            "background": RGBColor(252, 250, 250),  # 极简白 (微红)
+            "text": RGBColor(33, 33, 33),
+            "accent": RGBColor(198, 168, 105),  # 香槟金
+            "secondary": RGBColor(205, 92, 92),  # 印度红辅助
+        },
+        "琥珀金橙": {
+            "primary": RGBColor(184, 60, 0),  # 深琥珀橙
+            "background": RGBColor(252, 250, 245),  # 极简白 (微暖)
+            "text": RGBColor(33, 33, 33),
+            "accent": RGBColor(198, 168, 105),  # 香槟金
+            "secondary": RGBColor(205, 133, 63),  # 焦糖色辅助
         },
         "学术风": {
             "primary": RGBColor(128, 0, 0),  # 主色调：深红
@@ -85,6 +108,27 @@ class AIPPTToPPTXService:
             "content": 1,
             "end": 0,
         },
+        "翡翠森绿": {
+            "cover": 0,
+            "contents": 1,
+            "transition": 2,
+            "content": 1,
+            "end": 0,
+        },
+        "丹砂赤红": {
+            "cover": 0,
+            "contents": 1,
+            "transition": 2,
+            "content": 1,
+            "end": 0,
+        },
+        "琥珀金橙": {
+            "cover": 0,
+            "contents": 1,
+            "transition": 2,
+            "content": 1,
+            "end": 0,
+        },
         "学术风": {
             "cover": 0,
             "contents": 1,
@@ -123,6 +167,22 @@ class AIPPTToPPTXService:
         self.layouts = self._get_style_layouts(style)
         # 记录每个 transition 下 content 的序号（用于三种版式轮换）
         self._section_variant_seq = 0
+        # 本地图片缓存目录（避免重复下载 & 支持 Referer/UA）
+        try:
+            base = (
+                config.workspace_root
+                if hasattr(config, "workspace_root")
+                else Path("workspace")
+            )
+            self._image_cache_dir = (base / "cache" / "images").resolve()
+            self._image_cache_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # 兜底到项目下的临时目录
+            self._image_cache_dir = Path(".cache_images").resolve()
+            try:
+                self._image_cache_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
 
     def create_presentation(self) -> Presentation:
         """创建新的演示文稿"""
@@ -220,8 +280,8 @@ class AIPPTToPPTXService:
         style = self.style or "通用"
 
         try:
-            if style == "皇家深蓝":
-                # 皇家深蓝过渡页使用纯深蓝背景，文字反白，靠装饰线提亮
+            if style in ["皇家深蓝", "翡翠森绿", "丹砂赤红", "琥珀金橙"]:
+                # 皇家系列过渡页使用纯主色背景，文字反白，靠装饰线提亮
                 self._set_solid_background(slide, primary)
             elif style == "学术风":
                 end = self._lighten(primary, 40)
@@ -255,8 +315,8 @@ class AIPPTToPPTXService:
     def _apply_slide_background(self, slide, slide_type: str):
         """根据幻灯片类型和风格应用背景"""
         try:
-            # 皇家深蓝特殊处理：封面和过渡页自定义背景，内容页使用统一浅色背景
-            if self.style == "皇家深蓝":
+            # 皇家系列特殊处理：封面和过渡页自定义背景，内容页使用统一浅色背景
+            if self.style in ["皇家深蓝", "翡翠森绿", "丹砂赤红", "琥珀金橙"]:
                 if slide_type == "transition":
                     self._apply_transition_background(slide)
                 else:
@@ -279,8 +339,8 @@ class AIPPTToPPTXService:
             logger.warning(f"Failed to apply slide background: {e}")
 
     def _add_royal_decoration(self, slide, slide_type: str):
-        """为皇家深蓝风格添加专属装饰"""
-        if self.style != "皇家深蓝":
+        """为皇家系列风格添加专属装饰"""
+        if self.style not in ["皇家深蓝", "翡翠森绿", "丹砂赤红", "琥珀金橙"]:
             return
 
         slide_w = self.prs.slide_width
@@ -513,6 +573,86 @@ class AIPPTToPPTXService:
             logger.error(f"AIPPTSlide to PPTX conversion failed: {e}")
             return {"status": "failed", "filepath": output_path, "error": str(e)}
 
+    # ---------- 图片下载与缓存 ----------
+    def _default_headers(self) -> dict:
+        return {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/121.0 Safari/537.36"
+            ),
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        }
+
+    def _filename_for_url(self, url: str, content_type: Optional[str] = None) -> str:
+        try:
+            parsed = urlparse(url)
+            name = Path(parsed.path).name or "image"
+            # 如果没有扩展名，尝试根据 content-type 添加
+            suffix = Path(name).suffix.lower()
+            if not suffix and content_type:
+                if "jpeg" in content_type:
+                    suffix = ".jpg"
+                elif "png" in content_type:
+                    suffix = ".png"
+                elif "webp" in content_type:
+                    suffix = ".webp"
+                elif "gif" in content_type:
+                    suffix = ".gif"
+            # 用 URL 的哈希避免重名与过长文件名
+            h = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+            stem = (Path(name).stem or "image")[:40]
+            return f"{stem}_{h}{suffix or ''}"
+        except Exception:
+            h = hashlib.sha256((url or "").encode("utf-8")).hexdigest()[:16]
+            return f"image_{h}.bin"
+
+    def _download_image_to_cache(
+        self, url: str, referer: Optional[str] = None
+    ) -> Optional[str]:
+        if not url or not isinstance(url, str):
+            return None
+        headers = self._default_headers()
+        if referer:
+            headers["Referer"] = referer
+        try:
+            # 先发 HEAD 以判断 content-type（部分站点不支持 HEAD，失败则忽略）
+            ctype = None
+            try:
+                hr = requests.head(
+                    url, headers=headers, allow_redirects=True, timeout=8
+                )
+                if 200 <= hr.status_code < 400:
+                    ctype = hr.headers.get("content-type", "").lower()
+            except Exception:
+                pass
+
+            filename = self._filename_for_url(url, content_type=ctype)
+            dst = (self._image_cache_dir / filename).resolve()
+            if dst.exists() and dst.stat().st_size > 0:
+                return str(dst)
+
+            # GET 下载
+            r = requests.get(url, headers=headers, stream=True, timeout=20)
+            # 某些站点需要带上 Referer；如果 403/429/503 再尝试一次强制带 Referer 为目标域根
+            if r.status_code in (401, 403, 429, 503):
+                try:
+                    parsed = urlparse(url)
+                    if parsed.scheme and parsed.netloc:
+                        headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+                    r = requests.get(url, headers=headers, stream=True, timeout=20)
+                except Exception:
+                    pass
+            r.raise_for_status()
+            with open(dst, "wb") as f:
+                for chunk in r.iter_content(1024 * 64):
+                    if chunk:
+                        f.write(chunk)
+            return str(dst)
+        except Exception as e:
+            logger.warning(f"Image download failed: {url} ({e})")
+            return None
+
     def _create_cover_slide(self, slide_data: Dict[str, Any]):
         """创建封面页"""
         slide_layout = self._choose_layout("cover")
@@ -524,8 +664,8 @@ class AIPPTToPPTXService:
         title = data.get("title", "演示文稿")
         subtitle = data.get("text", "")
 
-        # 皇家深蓝：调整标题和副标题位置到右侧空白区域
-        if self.style == "皇家深蓝":
+        # 皇家系列：调整标题和副标题位置到右侧空白区域
+        if self.style in ["皇家深蓝", "翡翠森绿", "丹砂赤红", "琥珀金橙"]:
             slide_w = self.prs.slide_width
             slide_h = self.prs.slide_height
             # 右侧区域起始（避开左侧装饰）
@@ -612,7 +752,7 @@ class AIPPTToPPTXService:
                 ph.font.name = "PingFang SC Semibold"
                 ph.alignment = PP_ALIGN.LEFT
 
-                if self.style == "皇家深蓝":
+                if self.style in ["皇家深蓝", "翡翠森绿", "丹砂赤红", "琥珀金橙"]:
                     slide.shapes.title.left = Inches(1.0)
                     slide.shapes.title.top = Inches(0.8)  # 增加顶部边距，下移标题
                     slide.shapes.title.width = self.prs.slide_width - Inches(2.0)
@@ -626,7 +766,7 @@ class AIPPTToPPTXService:
             content_shape.text = ""
             tf = content_shape.text_frame
 
-            if self.style == "皇家深蓝":
+            if self.style in ["皇家深蓝", "翡翠森绿", "丹砂赤红", "琥珀金橙"]:
                 content_shape.left = Inches(1.0)
                 content_shape.top = Inches(
                     2.0
@@ -649,7 +789,7 @@ class AIPPTToPPTXService:
                 self._disable_bullets_paragraph(p)
                 try:
                     p.font.color.rgb = self.colors["text"]
-                    if self.style == "皇家深蓝":
+                    if self.style in ["皇家深蓝", "翡翠森绿", "丹砂赤红", "琥珀金橙"]:
                         # 目录项加粗
                         p.font.bold = True
                 except Exception:
@@ -674,7 +814,7 @@ class AIPPTToPPTXService:
             tp.font.size = Pt(48)
             tp.font.bold = True
 
-            if self.style == "皇家深蓝":
+            if self.style in ["皇家深蓝", "翡翠森绿", "丹砂赤红", "琥珀金橙"]:
                 tp.font.color.rgb = RGBColor(255, 255, 255)  # 反白
                 tp.alignment = PP_ALIGN.CENTER
                 # 居中调整
@@ -687,9 +827,9 @@ class AIPPTToPPTXService:
                 except Exception:
                     pass
 
-        # 皇家深蓝不显示小字 text 或 items，保持画面简洁有力作为转场
-        # 仅非皇家深蓝风格保留原有逻辑
-        if self.style != "皇家深蓝":
+        # 皇家系列不显示小字 text 或 items，保持画面简洁有力作为转场
+        # 仅非皇家系列风格保留原有逻辑
+        if self.style not in ["皇家深蓝", "翡翠森绿", "丹砂赤红", "琥珀金橙"]:
             # ... 原有过渡页 items 逻辑 ...
             pass
 
@@ -714,7 +854,7 @@ class AIPPTToPPTXService:
                 ph.font.bold = True
                 ph.alignment = PP_ALIGN.LEFT
 
-                if self.style == "皇家深蓝":
+                if self.style in ["皇家深蓝", "翡翠森绿", "丹砂赤红", "琥珀金橙"]:
                     # 增加标题下方的金色横线
                     line_w = self.prs.slide_width - Inches(1.0)
                     line = slide.shapes.add_shape(
@@ -820,7 +960,8 @@ class AIPPTToPPTXService:
                     run.font.bold = True
                     run.font.color.rgb = (
                         self.colors["primary"]
-                        if self.style == "皇家深蓝"
+                        if self.style
+                        in ["皇家深蓝", "翡翠森绿", "丹砂赤红", "琥珀金橙"]
                         else self.colors["text"]
                     )
 
@@ -849,7 +990,7 @@ class AIPPTToPPTXService:
             item: Dict[str, Any],
         ) -> Tuple[io.BytesIO | str | None, str]:
             # 返回 (image_file_or_stream, hint)
-            # 优先使用 path；其次 base64；url 仅作为占位提示
+            # 优先使用已有本地路径；其次 base64；最后下载 URL 到本地缓存并返回路径
             path = item.get("path") or item.get("file") or item.get("local_path")
             if isinstance(path, str) and path:
                 p = Path(path)
@@ -865,11 +1006,20 @@ class AIPPTToPPTXService:
                 except Exception:
                     pass
             url = item.get("url")
+            referer = item.get("referer") or item.get("ref")
             if isinstance(url, str) and url:
+                # 新策略：将 URL 下载到缓存目录，再以文件路径方式插入到 PPT
+                cached = self._download_image_to_cache(url, referer=referer)
+                if cached:
+                    return cached, url
+                # 兜底：尝试直接 GET 为内存流
                 try:
-                    resp = requests.get(url, timeout=8)
+                    headers = self._default_headers()
+                    if referer:
+                        headers["Referer"] = referer
+                    resp = requests.get(url, headers=headers, timeout=12)
                     if resp.status_code == 200:
-                        ctype = resp.headers.get("content-type", "")
+                        ctype = resp.headers.get("content-type", "").lower()
                         if ctype.startswith("image/") and resp.content:
                             return io.BytesIO(resp.content), url
                 except Exception:
@@ -1015,7 +1165,7 @@ class AIPPTToPPTXService:
             tp.font.bold = True
             tp.alignment = PP_ALIGN.CENTER
 
-            if self.style == "皇家深蓝":
+            if self.style in ["皇家深蓝", "翡翠森绿", "丹砂赤红", "琥珀金橙"]:
                 # 调整位置到左侧空白区中心
                 slide_w = self.prs.slide_width
                 slide_h = self.prs.slide_height

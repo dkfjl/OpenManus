@@ -83,15 +83,88 @@ async def _http_head(client: httpx.AsyncClient, url: str, source: Optional[str])
     return None, None
 
 
-"""Image retrieval utilities used by PPT media enrichment.
+"""Image retrieval utilities used by PPT media enrichment (Bocha-only).
 
-This module previously relied on a dedicated [image_search] configuration
-with Google CSE/Bing providers. The new approach intentionally routes all
-web discovery through the generic WebSearch tool, whose engine order is
-driven by [search] in config.toml (e.g., Bocha → Google). We then visit a
-few top result pages and extract actual image URLs, verifying them via HEAD.
+This module now relies solely on Bocha Web Search API's `images` response to
+discover direct image URLs for a given query. The legacy WebSearch/Playwright
+page-parsing pipeline has been removed to reduce latency and 403 risks.
 """
 
+# --- Bocha images provider (single source of truth) ---
+async def _bocha_fetch_images(query: str, count: int = 6) -> List[ImageCandidate]:
+    """Call Bocha Web Search API and parse images.value into ImageCandidate list.
+
+    Returns up to `count` items; silently returns [] if API key or query missing.
+    """
+    api_key = getattr(getattr(config, "search_config", None), "bocha_api_key", None)
+    if not api_key or not query:
+        return []
+    url = "https://api.bocha.cn/v1/web-search"
+    scfg = getattr(config, "search_config", None)
+    payload: dict = {
+        "query": query,
+        "count": min(50, max(1, int(count or 6))),
+        "summary": False,
+    }
+    try:
+        if scfg and getattr(scfg, "bocha_freshness", None):
+            payload["freshness"] = scfg.bocha_freshness
+        if scfg and getattr(scfg, "bocha_include", None):
+            payload["include"] = scfg.bocha_include
+        if scfg and getattr(scfg, "bocha_exclude", None):
+            payload["exclude"] = scfg.bocha_exclude
+    except Exception:
+        pass
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    out: List[ImageCandidate] = []
+    seen: Set[str] = set()
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(url, headers=headers, json=payload)
+            if r.status_code != 200:
+                logger.warning(f"Bocha images API non-200: {r.status_code}")
+                return []
+            data = r.json()
+    except Exception as e:
+        logger.warning(f"Bocha images API error: {e}")
+        return []
+
+    try:
+        images = (((data or {}).get("data") or {}).get("images") or {}).get("value") or []
+    except Exception:
+        images = []
+
+    for it in images:
+        try:
+            u = (it.get("contentUrl") or "").strip()
+            if not u:
+                continue
+            if u in seen:
+                continue
+            seen.add(u)
+            src = (it.get("hostPageUrl") or "").strip() or None
+            cand = ImageCandidate(url=u, source=src)
+            fmt = (it.get("encodingFormat") or "").lower()
+            if fmt:
+                if fmt in ("jpg", "jpeg"):
+                    cand.content_type = "image/jpeg"
+                elif fmt == "png":
+                    cand.content_type = "image/png"
+                elif fmt == "webp":
+                    cand.content_type = "image/webp"
+                elif fmt == "gif":
+                    cand.content_type = "image/gif"
+            out.append(cand)
+            if len(out) >= count:
+                break
+        except Exception:
+            continue
+    return out
 
 async def _playwright_collect_images_from_page(page, collected: Set[str], source_map: dict) -> None:
     # Capture network responses for images (catches dynamic requests)
@@ -407,57 +480,40 @@ async def _verify_candidates(cands: List[ImageCandidate], want: int) -> List[Ima
 
 
 async def discover_image_urls(query: str, max_images: int = 4) -> List[str]:
-    """Image discovery via generic WebSearch + page extraction.
-
-    Uses the [search] engine order from config.toml (e.g., Bocha → Google)
-    to find relevant pages, extracts candidate image URLs, verifies them with
-    HEAD, and returns direct image links.
-    """
+    """Bocha-only image discovery: parse images.value and return direct links."""
     log_execution_event(
         "image_discovery",
-        "start",
-        {"query": query, "max": max_images, "engine": getattr(getattr(config, "search_config", None), "engine", "")},
+        "start_bocha_only",
+        {"query": query, "max": max_images},
     )
 
-    candidates: List[ImageCandidate] = await _discover_with_playwright_fallback(
-        query, count=max_images * 6
-    )
-
-    if not candidates:
+    # Fetch a broader pool from Bocha images
+    pool = await _bocha_fetch_images(query, count=max(6, max_images * 3))
+    if not pool:
         log_execution_event("image_discovery", "no_candidates", {"query": query})
         return []
 
-    # Verify many, then rank and pick best
-    verified = await _verify_candidates(candidates, max_images)
-    if not verified:
-        log_execution_event("image_discovery", "verified_empty", {"query": query})
-        return []
-    picked = _rank_candidates(verified, query=query, limit=max_images)
-    urls = [c.url for c in picked]
-    log_execution_event("image_discovery", "done", {"found": len(urls)})
+    # Optional verification to fill content_type/size; safe to keep
+    verified = await _verify_candidates(pool, max_images)
+    ranked = _rank_candidates(verified or pool, query=query, limit=max_images)
+    urls = [c.url for c in ranked]
+    log_execution_event("image_discovery", "done_bocha_only", {"found": len(urls)})
     return urls
 
 
 async def discover_image_assets(query: str, max_images: int = 4) -> List[ImageCandidate]:
-    """Like discover_image_urls but returns ImageCandidate objects with source info.
-
-    Used when downstream needs per-URL referer (to bypass hotlinking).
-    """
+    """Bocha-only variant returning ImageCandidate with hostPageUrl as referer."""
     log_execution_event(
         "image_discovery",
-        "start_assets",
+        "start_assets_bocha_only",
         {"query": query, "max": max_images},
     )
-    candidates: List[ImageCandidate] = await _discover_with_playwright_fallback(
-        query, count=max_images * 6
-    )
-    if not candidates:
+    pool = await _bocha_fetch_images(query, count=max(6, max_images * 3))
+    if not pool:
         log_execution_event("image_discovery", "no_candidates_assets", {"query": query})
         return []
-    verified = await _verify_candidates(candidates, max_images)
-    if not verified:
-        return []
-    picked = _rank_candidates(verified, query=query, limit=max_images)
+    verified = await _verify_candidates(pool, max_images)
+    picked = _rank_candidates(verified or pool, query=query, limit=max_images)
     return picked
 
 
