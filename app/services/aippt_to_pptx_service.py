@@ -614,6 +614,9 @@ class AIPPTToPPTXService:
 
                 if self.style == "皇家深蓝":
                     slide.shapes.title.left = Inches(1.0)
+                    slide.shapes.title.top = Inches(0.8)  # 增加顶部边距，下移标题
+                    slide.shapes.title.width = self.prs.slide_width - Inches(2.0)
+                    slide.shapes.title.height = Inches(1.0)  # 固定标题区域高度
             except Exception:
                 pass
 
@@ -625,7 +628,13 @@ class AIPPTToPPTXService:
 
             if self.style == "皇家深蓝":
                 content_shape.left = Inches(1.0)
+                content_shape.top = Inches(
+                    2.0
+                )  # 下移内容，确保位于标题下方（标题Top 0.8 + Height 1.0 + 间距）
                 content_shape.width = self.prs.slide_width - Inches(2.0)
+                content_shape.height = self.prs.slide_height - Inches(
+                    2.5
+                )  # 限制高度，防止溢出底部
 
             for i, item in enumerate(items):
                 if i > 0:
@@ -1009,10 +1018,15 @@ class AIPPTToPPTXService:
             if self.style == "皇家深蓝":
                 # 调整位置到左侧空白区中心
                 slide_w = self.prs.slide_width
+                slide_h = self.prs.slide_height
                 content_w = slide_w * 0.62  # 除去右侧装饰
                 slide.shapes.title.left = 0
                 slide.shapes.title.width = int(content_w)
                 tp.font.color.rgb = self.colors["primary"]
+                # 计算垂直居中位置，确保"谢  谢"在页面中心
+                title_height = slide.shapes.title.height
+                center_top = (slide_h - title_height) // 2
+                slide.shapes.title.top = int(center_top)
             else:
                 try:
                     tp.font.color.rgb = self.colors["primary"]
