@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -204,3 +204,100 @@ class Memory(BaseModel):
             cleaned.append(msg)
 
         self.messages = cleaned
+
+
+class Substep(BaseModel):
+    """PPT大纲子步骤"""
+
+    key: str = Field(..., description="步骤唯一标识")
+    text: str = Field(..., description="步骤描述文本")
+    showDetail: bool = Field(default=False, description="是否显示详细信息")
+    detailType: Optional[str] = Field(
+        default=None, description="详情类型：markdown/ppt"
+    )
+    detailPayload: Optional[Dict[str, Any]] = Field(
+        default=None, description="详情负载数据"
+    )
+
+
+class MetaData(BaseModel):
+    """PPT大纲元数据"""
+
+    summary: str = Field(..., description="该步骤的摘要说明")
+    substeps: List[Substep] = Field(default_factory=list, description="子步骤列表")
+
+
+class PPTOutlineItem(BaseModel):
+    """PPT大纲项目"""
+
+    key: str = Field(..., description="项目唯一标识")
+    title: str = Field(..., description="标题")
+    description: str = Field(..., description="描述")
+    detailType: str = Field(default="markdown", description="详情类型")
+    meta: MetaData = Field(..., description="元数据信息")
+
+
+class PPTOutlineRequest(BaseModel):
+    """PPT大纲生成请求"""
+
+    topic: str = Field(..., description="PPT主题")
+    language: str = Field(default="zh", description="输出语言，默认为中文")
+    file_uuids: Optional[List[str]] = Field(
+        default=None, description="已上传文件的UUID列表，用于引用之前上传的文件"
+    )
+
+
+class PPTOutlineResponse(BaseModel):
+    """PPT大纲生成响应"""
+
+    status: str = Field(..., description="处理状态：success/error")
+    outline: List[PPTOutlineItem] = Field(
+        default_factory=list, description="PPT大纲项目列表"
+    )
+    enhanced_outline_status: str = Field(
+        default="pending",
+        description="增强版大纲状态：pending/processing/completed/failed",
+    )
+    enhanced_outline_uuid: Optional[str] = Field(
+        default=None, description="增强版大纲UUID（状态为completed时提供）"
+    )
+    topic: str = Field(..., description="PPT主题")
+    language: str = Field(..., description="输出语言")
+    execution_time: float = Field(..., description="执行时间（秒）")
+    reference_sources: List[str] = Field(
+        default_factory=list, description="参考文件源列表"
+    )
+
+
+class FileInfo(BaseModel):
+    """文件信息"""
+
+    uuid: str = Field(..., description="文件UUID")
+    original_name: str = Field(..., description="原始文件名")
+    saved_name: str = Field(..., description="保存的文件名")
+    size: int = Field(..., description="文件大小（字节）")
+    type: str = Field(..., description="文件MIME类型")
+
+
+class FileUploadResponse(BaseModel):
+    """文件上传响应"""
+
+    status: str = Field(..., description="上传状态：success/error")
+    uuids: List[str] = Field(default_factory=list, description="上传文件的UUID列表")
+    files: List[FileInfo] = Field(
+        default_factory=list, description="上传文件的信息列表"
+    )
+    message: str = Field(..., description="响应消息")
+
+
+class FileUploadRequest(BaseModel):
+    """文件上传请求（用于文档说明）"""
+
+    max_files: int = Field(default=5, description="最大文件数量")
+    supported_types: List[str] = Field(
+        default=["pdf", "docx", "txt", "jpg", "jpeg", "png", "html", "htm"],
+        description="支持的文件类型",
+    )
+    max_file_size: int = Field(
+        default=10 * 1024 * 1024, description="最大文件大小（字节）"
+    )
