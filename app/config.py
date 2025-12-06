@@ -209,6 +209,43 @@ class KnowledgeBaseSettings(BaseModel):
     )
 
 
+class DifyKnowledgeBaseSettings(BaseModel):
+    """Configuration for Dify knowledge base integration"""
+
+    api_base: str = Field(
+        "https://api.dify.ai/v1",
+        description="Dify API service base URL"
+    )
+    api_key: str = Field(
+        "",
+        description="Dataset-specific API key for authentication"
+    )
+    dataset_id: Optional[str] = Field(
+        None,
+        description="Dataset ID if API key is not bound to specific dataset"
+    )
+    retrieval_model: str = Field(
+        "search",
+        description="Retrieval model to use"
+    )
+    score_threshold: float = Field(
+        0.5,
+        description="Minimum relevance score threshold"
+    )
+    top_k: int = Field(
+        3,
+        description="Number of top results to retrieve"
+    )
+    timeout: int = Field(
+        5,
+        description="Request timeout in seconds"
+    )
+    max_retries: int = Field(
+        3,
+        description="Maximum retry attempts for failed requests"
+    )
+
+
 class AIPPTSettings(BaseModel):
     """Configuration for AIPPT third-party API"""
     base_url: str = Field(
@@ -371,6 +408,10 @@ class AppConfig(BaseModel):
     image_search_config: Optional[ImageSearchSettings] = Field(
         None, description="Image search configuration"
     )
+    dify_config: Optional[DifyKnowledgeBaseSettings] = Field(
+        None,
+        description="Dify knowledge base configuration"
+    )
 
     class Config:
         arbitrary_types_allowed = True
@@ -526,6 +567,11 @@ class Config:
             aippt_settings = AIPPTSettings(**aippt_config)
         else:
             aippt_settings = AIPPTSettings()
+        dify_config = raw_config.get("dify")
+        if dify_config:
+            dify_settings = DifyKnowledgeBaseSettings(**dify_config)
+        else:
+            dify_settings = DifyKnowledgeBaseSettings()
         config_dict = {
             "llm": {
                 "default": default_settings,
@@ -544,6 +590,7 @@ class Config:
             "document_config": document_settings,
             "knowledge_base_config": knowledge_base_settings,
             "image_search_config": image_search_settings,
+            "dify_config": dify_settings,
         }
 
         self._config = AppConfig(**config_dict)
@@ -596,6 +643,11 @@ class Config:
     def aippt_config(self) -> AIPPTSettings:
         """Get AIPPT API configuration"""
         return self._config.aippt_config
+
+    @property
+    def dify(self) -> Optional[DifyKnowledgeBaseSettings]:
+        """Get Dify knowledge base configuration"""
+        return self._config.dify_config
 
     @property
     def workspace_root(self) -> Path:

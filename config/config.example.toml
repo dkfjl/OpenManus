@@ -160,9 +160,13 @@ server_reference = "app.mcp.server" # default server module reference
 [runflow]
 use_data_analysis_agent = false     # The Data Analysi Agent to solve various data analysis tasks
 
-# AIPPT configuration for PPT generation
-[aippt]
-base_url = "http://192.168.1.119:3001"  # AIPPT API base URL
-request_timeout = 300                      # Request timeout in seconds
-default_style = "通用"                      # Default PPT style (通用/学术风/职场风/教育风/营销风)
-default_model = "gemini-3-pro-preview"     # Default AI model
+# Dify knowledge base configuration (optional)
+[dify]
+api_base = "https://api.dify.ai/v1"  # Dify API service base URL
+api_key = "YOUR_DIFY_API_KEY"        # Dataset-specific API key
+dataset_id = "YOUR_DATASET_ID"       # Dataset ID (optional if API key is bound to specific dataset)
+retrieval_model = "search"           # Retrieval model to use
+score_threshold = 0.5                # Minimum relevance score threshold
+top_k = 3                           # Number of top results to retrieve
+timeout = 5                         # Request timeout in seconds
+max_retries = 3                     # Maximum retry attempts
