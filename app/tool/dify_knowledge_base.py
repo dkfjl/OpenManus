@@ -26,8 +26,23 @@ class KnowledgeRetrievalResult(ToolResult):
 
         output_lines = [f"Knowledge base search results for '{self.query}':"]
 
+        def _extract_content(rec: dict) -> str:
+            for k in ("content", "text", "segment_text", "segmentContent", "document_text", "doc_text"):
+                v = rec.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v
+            for parent in ("segment", "document"):
+                obj = rec.get(parent)
+                if isinstance(obj, dict):
+                    for k in ("content", "text"):
+                        v = obj.get(k)
+                        if isinstance(v, str) and v.strip():
+                            return v
+            v = rec.get("answer")
+            return v if isinstance(v, str) else ""
+
         for i, record in enumerate(self.results, 1):
-            content = record.get("content", "")
+            content = _extract_content(record)
             score = record.get("score", 0)
             metadata = record.get("metadata", {})
 

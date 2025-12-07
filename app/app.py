@@ -38,6 +38,12 @@ def create_app() -> FastAPI:
     # Routers
     app.include_router(health_router)
     app.include_router(prompt_router)
+    try:
+        from app.api.routes.knowledge import router as kb_router  # type: ignore
+
+        app.include_router(kb_router)
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"Optional knowledge router not loaded: {e}")
 
     # Lazily import optional routers to avoid heavy/development-only deps
     # This keeps the app importable when optional packages are missing

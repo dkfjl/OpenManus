@@ -60,6 +60,7 @@ class DifyClient:
         retrieval_model: Optional[Union[str, Dict[str, Any]]] = None,
         score_threshold: float = 0.5,
         top_k: int = 3,
+        override_api_key: Optional[str] = None,
     ) -> DifyRetrievalResponse:
         """
         Retrieve knowledge from Dify knowledge base
@@ -74,7 +75,8 @@ class DifyClient:
         Returns:
             DifyRetrievalResponse with retrieved records
         """
-        if not config.dify or not config.dify.api_key:
+        effective_api_key = override_api_key or (config.dify.api_key if config.dify else None)
+        if not effective_api_key:
             raise ValueError("Dify configuration not properly set")
 
         # Build base payload (omit retrieval_model for now)
@@ -95,7 +97,7 @@ class DifyClient:
 
         # Build headers
         headers = {
-            "Authorization": f"Bearer {config.dify.api_key}",
+            "Authorization": f"Bearer {effective_api_key}",
             "Content-Type": "application/json",
         }
 
