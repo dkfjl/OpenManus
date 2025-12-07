@@ -126,3 +126,4 @@ class PromptDetailQuery(BaseModel):
     """提示词详情查询参数"""
     type: Literal["recommended", "personal"] = Field(..., description="提示词类型")
     id: str = Field(..., description="提示词ID")
+

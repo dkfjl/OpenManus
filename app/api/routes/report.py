@@ -3,7 +3,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Form, HTTPException
 
-from app.api.schemas import ReportResult
+from app.schemas.report import ReportResult
 from app.logger import logger
 from app.services.execution_log_service import (
     end_execution_log,
@@ -132,4 +132,3 @@ async def generate_report_endpoint(
     finally:
         if not log_closed:
             log_session.deactivate()
-

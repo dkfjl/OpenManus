@@ -1,2 +1,1 @@
-"""API package: contains routers and endpoint-level schemas."""
-
+"""API package: contains HTTP routes and API-level dependencies only."""

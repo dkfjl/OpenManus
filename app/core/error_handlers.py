@@ -10,7 +10,7 @@ from fastapi.exceptions import RequestValidationError
 
 from app.services.prompt_storage import (
     PromptNotFoundError,
-    PromptConflictError
+    PromptConflictError,
 )
 from app.services.prompt_service import ValidationError
 from app.logger import logger
@@ -18,6 +18,7 @@ from app.logger import logger
 
 class PromptLibraryException(Exception):
     """提示词库基础异常"""
+
     def __init__(self, code: str, message: str, status_code: int = 500, details: any = None):
         self.code = code
         self.message = message
@@ -39,10 +40,7 @@ def create_error_response(code: str, message: str, details: any = None) -> dict:
         错误响应字典
     """
     error_dict = {
-        "error": {
-            "code": code,
-            "message": message
-        }
+        "error": {"code": code, "message": message}
     }
 
     if details is not None:
@@ -56,10 +54,7 @@ async def validation_error_handler(request: Request, exc: ValidationError) -> JS
     logger.warning(f"Validation error: {str(exc)}")
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
-        content=create_error_response(
-            code="VALIDATION_ERROR",
-            message=str(exc)
-        )
+        content=create_error_response(code="VALIDATION_ERROR", message=str(exc)),
     )
 
 
@@ -69,10 +64,8 @@ async def pydantic_validation_error_handler(request: Request, exc: PydanticValid
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
         content=create_error_response(
-            code="VALIDATION_ERROR",
-            message="请求数据格式错误",
-            details=exc.errors()
-        )
+            code="VALIDATION_ERROR", message="请求数据格式错误", details=exc.errors()
+        ),
     )
 
 
@@ -98,9 +91,7 @@ async def request_validation_error_handler(request: Request, exc: RequestValidat
     return JSONResponse(
         status_code=status_code,
         content=create_error_response(
-            code="VALIDATION_ERROR",
-            message="请求数据格式错误",
-            details=errors,
+            code="VALIDATION_ERROR", message="请求数据格式错误", details=errors
         ),
     )
 
@@ -110,10 +101,7 @@ async def prompt_not_found_handler(request: Request, exc: PromptNotFoundError) -
     logger.warning(f"Prompt not found: {str(exc)}")
     return JSONResponse(
         status_code=status.HTTP_404_NOT_FOUND,
-        content=create_error_response(
-            code="NOT_FOUND",
-            message=str(exc)
-        )
+        content=create_error_response(code="NOT_FOUND", message=str(exc)),
     )
 
 
@@ -122,10 +110,7 @@ async def prompt_conflict_handler(request: Request, exc: PromptConflictError) ->
     logger.warning(f"Prompt conflict: {str(exc)}")
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
-        content=create_error_response(
-            code="CONFLICT",
-            message=str(exc)
-        )
+        content=create_error_response(code="CONFLICT", message=str(exc)),
     )
 
 
@@ -134,10 +119,7 @@ async def permission_error_handler(request: Request, exc: PermissionError) -> JS
     logger.warning(f"Permission denied: {str(exc)}")
     return JSONResponse(
         status_code=status.HTTP_403_FORBIDDEN,
-        content=create_error_response(
-            code="FORBIDDEN",
-            message=str(exc)
-        )
+        content=create_error_response(code="FORBIDDEN", message=str(exc)),
     )
 
 
@@ -147,10 +129,8 @@ async def prompt_library_exception_handler(request: Request, exc: PromptLibraryE
     return JSONResponse(
         status_code=exc.status_code,
         content=create_error_response(
-            code=exc.code,
-            message=exc.message,
-            details=exc.details
-        )
+            code=exc.code, message=exc.message, details=exc.details
+        ),
     )
 
 
@@ -160,9 +140,8 @@ async def generic_error_handler(request: Request, exc: Exception) -> JSONRespons
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=create_error_response(
-            code="INTERNAL_SERVER_ERROR",
-            message="服务器内部错误"
-        )
+            code="INTERNAL_SERVER_ERROR", message="服务器内部错误"
+        ),
     )
 
 
@@ -184,3 +163,4 @@ def register_error_handlers(app):
     # app.add_exception_handler(Exception, generic_error_handler)  # 可选：根据需要启用
 
     logger.info("Registered prompt library error handlers")
+

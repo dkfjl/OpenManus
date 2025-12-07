@@ -2,16 +2,26 @@ import asyncio
 from typing import Optional
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-from app.logger import logger
+from app.core.error_handlers import register_error_handlers
 from app.api.routes.health import router as health_router
 from app.api.routes.prompt import router as prompt_router
-from app.api.error_handlers import register_error_handlers
+from app.logger import logger
 from app.utils.async_tasks import start_periodic_cleanup
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="OpenManus Service", version="1.0.0")
+
+    # Configure CORS middleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Allow all origins for development
+        allow_credentials=True,
+        allow_methods=["*"],  # Allow all HTTP methods
+        allow_headers=["*"],  # Allow all headers
+    )
 
     # Register error handlers for prompt library
     register_error_handlers(app)
@@ -33,24 +43,28 @@ def create_app() -> FastAPI:
     # This keeps the app importable when optional packages are missing
     try:
         from app.api.routes.run import router as run_router  # type: ignore
+
         app.include_router(run_router)
     except Exception as e:  # pragma: no cover
         logger.warning(f"Optional run router not loaded: {e}")
 
     try:
         from app.api.routes.report import router as report_router  # type: ignore
+
         app.include_router(report_router)
     except Exception as e:  # pragma: no cover
         logger.warning(f"Optional report router not loaded: {e}")
 
     try:
         from app.api.routes.ppt_outline import router as ppt_router  # type: ignore
+
         app.include_router(ppt_router)
     except Exception as e:  # pragma: no cover
         logger.warning(f"Optional ppt router not loaded: {e}")
 
     try:
         from app.api.routes.files import router as files_router  # type: ignore
+
         app.include_router(files_router)
     except Exception as e:  # pragma: no cover
         logger.warning(f"Optional files router not loaded: {e}")

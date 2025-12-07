@@ -13,7 +13,7 @@ from app.services.file_upload_service import (
 from app.services.ppt_outline_service import generate_ppt_outline_with_format
 from app.utils.async_tasks import get_enhanced_outline_status
 
-from app.api.schemas import PPTOutlineResponse
+from app.schemas.ppt_outline import PPTOutlineResponse
 
 router = APIRouter()
 
@@ -208,4 +208,3 @@ def _get_status_message(status: str) -> str:
         "not_found": "增强版大纲未找到",
     }
     return status_messages.get(status, "未知状态")
-

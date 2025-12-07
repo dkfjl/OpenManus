@@ -9,7 +9,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, Query, Path, status
 
 from app.api.deps.auth import get_current_user, get_optional_user
-from app.api.schemas_prompt import (
+from app.schemas.prompt import (
     PromptCreate,
     PromptUpdate,
     PromptCreateResponse,

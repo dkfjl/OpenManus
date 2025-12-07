@@ -4,7 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.api.schemas import RunRequest, RunResponse
+from app.schemas.run import RunRequest, RunResponse
 from app.logger import logger
 from app.services import run_manus_flow
 from app.services.execution_log_service import (
@@ -114,4 +114,3 @@ async def run_manus_endpoint(payload: RunRequest, request: Request) -> RunRespon
     finally:
         if not log_closed:
             log_session.deactivate()
-
