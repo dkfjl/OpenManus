@@ -12,6 +12,7 @@ from app.prompt.manus import NEXT_STEP_PROMPT, SYSTEM_PROMPT
 from app.tool import Terminate, ToolCollection
 from app.tool.ask_human import AskHuman
 from app.tool.mcp import MCPClients, MCPClientTool
+from app.tool.prompt_library import PromptLibraryTool
 from app.tool.sandbox.sb_browser_tool import SandboxBrowserTool
 from app.tool.sandbox.sb_files_tool import SandboxFilesTool
 from app.tool.sandbox.sb_shell_tool import SandboxShellTool
@@ -41,6 +42,7 @@ class SandboxManus(ToolCallAgent):
             # StrReplaceEditor(),
             AskHuman(),
             Terminate(),
+            PromptLibraryTool(),
         )
     )
 

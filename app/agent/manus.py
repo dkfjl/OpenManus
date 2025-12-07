@@ -12,6 +12,7 @@ from app.tool.ask_human import AskHuman
 from app.tool.browser_use_tool import BrowserUseTool
 from app.tool.dify_knowledge_base import DifyKnowledgeRetriever
 from app.tool.mcp import MCPClients, MCPClientTool
+from app.tool.prompt_library import PromptLibraryTool
 from app.tool.python_execute import PythonExecute
 from app.tool.str_replace_editor import StrReplaceEditor
 
@@ -40,6 +41,7 @@ class Manus(ToolCallAgent):
             AskHuman(),
             Terminate(),
             DifyKnowledgeRetriever(),
+            PromptLibraryTool(),
         )
     )
 

@@ -1,4 +1,5 @@
 import asyncio
+import os
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -11,18 +12,53 @@ from app.services.execution_log_service import (
     log_execution_event,
     start_execution_log,
 )
+from app.services.prompt_service import PromptService
 
 router = APIRouter()
 
 
 @router.post("/run", response_model=RunResponse)
 async def run_manus_endpoint(payload: RunRequest, request: Request) -> RunResponse:
-    prompt = payload.prompt.strip()
+    # 初始化 prompt service
+    prompt_service = PromptService()
+
+    # 处理提示词：支持 promptId 注入和变量替换
+    final_prompt = payload.prompt or ""
+
+    if payload.promptId:
+        try:
+            # 获取当前用户ID（用于个人提示词）
+            owner_id = os.getenv("CURRENT_USER_ID", "default_user")
+
+            # 使用 service 的 get_and_merge_prompt 方法
+            template_prompt = prompt_service.get_and_merge_prompt(
+                prompt_type=payload.promptType,
+                prompt_id=payload.promptId,
+                owner_id=owner_id if payload.promptType == "personal" else None,
+                merge_vars=payload.mergeVars,
+                additional_prompt=final_prompt if final_prompt else None
+            )
+
+            # 如果没有 additional_prompt，直接使用模板
+            final_prompt = template_prompt
+
+            logger.info(f"Using prompt template {payload.promptId}, final prompt length: {len(final_prompt)}")
+        except Exception as e:
+            logger.error(f"Failed to load prompt template {payload.promptId}: {str(e)}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to load prompt template: {str(e)}"
+            )
+
+    prompt = final_prompt.strip()
     log_session = start_execution_log(
         flow_type="manus_flow",
         metadata={
             "entrypoint": "http.run",
             "allow_interactive_fallback": payload.allow_interactive_fallback,
+            "prompt_id": payload.promptId,
+            "prompt_type": payload.promptType,
+            "has_merge_vars": payload.mergeVars is not None,
         },
     )
     log_closed = False

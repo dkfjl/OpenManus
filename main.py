@@ -4,8 +4,8 @@ import asyncio
 import uvicorn
 
 from app.app import app
-from app.services import run_manus_flow
 from app.logger import logger
+from app.services import run_manus_flow
 
 
 def parse_args() -> argparse.Namespace:
