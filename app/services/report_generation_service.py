@@ -3,13 +3,56 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from app.agent.report_agents import (ReportResearchAgent, ReportSearchAgent,
-                                     ReportWriterAgent, TocGeneratorAgent)
+from app.agent.report_agents import (
+    ReportResearchAgent,
+    ReportSearchAgent,
+    ReportWriterAgent,
+    TocGeneratorAgent,
+    # newly used for subsection-level content
+    
+)
 from app.flow.planning import PlanningFlow
 from app.logger import logger
 from app.services.document_service import DocumentGenerator
 from app.services.execution_log_service import log_execution_event
 from app.tool.word_document import WordDocumentTool
+
+
+def _clean_agent_text(text: str) -> str:
+    """Remove execution-log artifacts like "Step 1:", "Terminated:" etc.
+
+    This mirrors the cleaning logic used by ChapterContentAgent so that TOC
+    or any plain-text agent output won't pollute parsing.
+    """
+    if not text:
+        return ""
+
+    t = text.strip()
+    # Drop common leading prefixes
+    prefixes = [
+        "Step 1:", "Step 2:", "Step 3:",
+        "Observed output of cmd", "Terminated:", "Assistant:", "ChapterContentAgent:",
+    ]
+    for p in prefixes:
+        if t.startswith(p):
+            t = t[len(p):].strip()
+
+    # Remove noisy lines
+    clean_lines = []
+    for line in t.split("\n"):
+        s = line.strip()
+        if not s:
+            continue
+        if any(m in s for m in [
+            "Observed output", "executed:", "Search results for", "URL:", "Description:",
+            "问题分析中", "Terminated:"
+        ]):
+            continue
+        # If a line is like "Step N: 1. XXX" keep the part after the first chapter index
+        # e.g., "Step 1: 1. Title" -> "1. Title"
+        s = re.sub(r"^Step\s*\d+\s*:\s*", "", s)
+        clean_lines.append(s)
+    return "\n".join(clean_lines).strip()
 
 
 def _default_reports_path(topic: str) -> Path:
@@ -56,7 +99,8 @@ async def generate_report_from_steps(
         pass
 
     toc_result = await toc_generator.run("")
-    toc_body = toc_result.strip() if toc_result else "1. 引言\n2. 正文\n3. 结论\n4. 参考文献"
+    toc_raw = toc_result.strip() if toc_result else "1. 引言\n2. 正文\n3. 结论\n4. 参考文献"
+    toc_body = _clean_agent_text(toc_raw)
 
     log_execution_event(
         "report_gen",
@@ -70,7 +114,7 @@ async def generate_report_from_steps(
     current_chapter = None
 
     for line in toc_lines:
-        # Match main chapters (e.g., "1. 章节标题")
+        # Match main chapters (e.g., "1. 章节标题") allowing any leading noise already trimmed
         chapter_match = re.match(r'^(\d+)\.\s+(.+)$', line)
         if chapter_match:
             if current_chapter:
@@ -100,84 +144,90 @@ async def generate_report_from_steps(
             {"number": 5, "title": "结论与展望", "sections": ["主要结论", "发展建议", "未来展望"]}
         ]
 
-    # Step 3: Parallel chapter content generation
+    # Step 3: Parallel subsection content generation
     import asyncio
+    from app.agent.report_agents import SubsectionContentAgent
 
-    from app.agent.report_agents import ChapterContentAgent
-
-    # Create chapter content agents for parallel execution
-    chapter_tasks = []
-    for i, chapter in enumerate(chapters[:5]):  # Limit to 5 chapters
-        agent = ChapterContentAgent(
-            language=language or "zh",
-            topic=topic,
-            chapter_number=chapter['number'],
-            chapter_title=chapter['title'],
-            sections=chapter['sections'],
-            reference_summary=(reference_content[:2000] if reference_content else None),
-            previous_chapters=None if i == 0 else f"已生成第{i}章内容"
-        )
-
-        # Clamp token budget
-        try:
-            if hasattr(agent, "llm") and hasattr(agent.llm, "max_tokens"):
-                agent.llm.max_tokens = min(int(agent.llm.max_tokens or 1024), 4096)
-        except Exception:
-            pass
-
-        chapter_tasks.append(agent.run(""))
+    subsection_tasks = []
+    subsection_agents = []
+    index_map = []  # (chapter_idx, subsection_idx)
+    limited_chapters = chapters[:5]
+    for ci, chapter in enumerate(limited_chapters):
+        sections = chapter.get("sections") or []
+        for si, sec_title in enumerate(sections[:3]):  # cap to 3 per design
+            agent = SubsectionContentAgent(
+                language=language or "zh",
+                topic=topic,
+                chapter_number=chapter["number"],
+                chapter_title=chapter["title"],
+                subsection_code=f"{chapter['number']}.{si+1}",
+                subsection_title=sec_title,
+                reference_summary=(reference_content[:2000] if reference_content else None),
+                previous_chapters=None if ci == 0 else f"已生成第{limited_chapters[ci-1]['number']}章概述",
+            )
+            try:
+                if hasattr(agent, "llm") and hasattr(agent.llm, "max_tokens"):
+                    agent.llm.max_tokens = min(int(getattr(agent.llm, "max_tokens", 1024) or 1024), 2048)
+            except Exception:
+                pass
+            subsection_tasks.append(agent.run(""))
+            subsection_agents.append(agent)
+            index_map.append((ci, si))
 
     log_execution_event(
         "report_gen",
-        "Starting parallel chapter generation",
-        {"chapters_count": len(chapter_tasks)},
+        "Starting parallel subsection generation",
+        {"subsections_count": len(subsection_tasks)},
     )
 
-    # Execute all chapter generation tasks in parallel
-    chapter_results = await asyncio.gather(*chapter_tasks, return_exceptions=True)
+    subsection_results = await asyncio.gather(*subsection_tasks, return_exceptions=True)
 
-    # Extract chapter contents from results
-    chapter_contents = []
-    for i, result in enumerate(chapter_results):
+    # Organize subsection content into chapters
+    subsection_contents: List[List[str]] = [
+        [""] * min(3, len(ch.get("sections") or [])) for ch in limited_chapters
+    ]
+    for (ci, si), result in zip(index_map, subsection_results):
         if isinstance(result, Exception):
-            logger.warning(f"Chapter {i+1} generation failed: {result}")
-            chapter_contents.append(f"第{i+1}章内容生成失败，请手动补充。")
+            logger.warning(f"Subsection {ci+1}.{si+1} generation failed: {result}")
+            subsection_contents[ci][si] = f"第{limited_chapters[ci]['number']}.{si+1}节内容生成失败，请手动补充。"
         else:
-            chapter_contents.append(result.strip() if result else f"第{i+1}章内容生成为空，请手动补充。")
+            subsection_contents[ci][si] = (result or "").strip() or f"第{limited_chapters[ci]['number']}.{si+1}节内容生成为空，请手动补充。"
 
     log_execution_event(
         "report_gen",
-        "Parallel chapter generation completed",
-        {"successful_chapters": len([c for c in chapter_contents if not c.startswith("第") and "失败" in c])},
+        "Parallel subsection generation completed",
+        {"chapters": len(limited_chapters), "subsections_generated": sum(len(x) for x in subsection_contents)},
     )
 
-    # Step 4: Sequential document writing
+    # Step 4: Document writing with chapters and subsections
     word_tool = WordDocumentTool()
-
-    # Write TOC and first chapter
-    first_chapter_content = chapter_contents[0] if chapter_contents else ""
+    # First write: title + TOC only
     await word_tool.execute(
         filepath=abs_path,
         document_title=topic,
-        sections=[
-            {"heading": "内容目录", "level": 1, "content": toc_body},
-            {"heading": f"第{chapters[0]['number']}章 {chapters[0]['title']}", "level": 1, "content": first_chapter_content}
-        ],
+        sections=[{"heading": "内容目录", "level": 1, "content": toc_body}],
         append=False,
     )
 
-    # Write remaining chapters sequentially
-    for i in range(1, min(len(chapter_contents), len(chapters))):
-        if i < len(chapter_contents) and i < len(chapters):
-            await word_tool.execute(
-                filepath=abs_path,
-                sections=[{
-                    "heading": f"第{chapters[i]['number']}章 {chapters[i]['title']}",
-                    "level": 1,
-                    "content": chapter_contents[i]
-                }],
-                append=True,
-            )
+    # Then write each chapter heading and its subsections
+    for i, ch in enumerate(limited_chapters):
+        sections_payload = []
+        sections_payload.append({
+            "heading": f"第{ch['number']}章 {ch['title']}",
+            "level": 1,
+        })
+        for si, sec_title in enumerate((ch.get("sections") or [])[:3]):
+            content = subsection_contents[i][si] if si < len(subsection_contents[i]) else ""
+            sections_payload.append({
+                "heading": f"{ch['number']}.{si+1} {sec_title}",
+                "level": 2,
+                "content": content,
+            })
+        await word_tool.execute(
+            filepath=abs_path,
+            sections=sections_payload,
+            append=True,
+        )
 
     # Step 5: Add overview and references if applicable
     overview_section = None
@@ -207,18 +257,44 @@ async def generate_report_from_steps(
             append=True,
         )
 
+    # Step 7: Append searched URL list gathered during subsection generation
+    try:
+        viewed_urls: List[str] = []
+        seen_urls = set()
+        for ag in subsection_agents:
+            for u in getattr(ag, "viewed_urls", []) or []:
+                if u and u not in seen_urls:
+                    seen_urls.add(u)
+                    viewed_urls.append(u)
+        if viewed_urls:
+            await word_tool.execute(
+                filepath=abs_path,
+                sections=[{
+                    "heading": "搜索中查看的 URL",
+                    "level": 1,
+                    "bullets": viewed_urls,
+                }],
+                append=True,
+            )
+    except Exception as _e:
+        logger.warning(f"Append viewed URLs failed: {_e}")
+
     log_execution_event(
         "report_gen",
         "Parallel report generation completed",
         {
             "filepath": abs_path,
-            "chapters_generated": len(chapter_contents),
+            "chapters_generated": len(limited_chapters),
+            "subsections_generated": sum(len(x) for x in subsection_contents),
             "with_overview": overview_section is not None,
             "with_references": bool(reference_sources)
         },
     )
 
-    summary = f"并行生成了{len(chapters)}个章节，包含目录、正文、参考概述和参考文献"
+    summary = (
+        f"并行生成了{len(limited_chapters)}章的分节内容，"
+        f"包含目录、各章标题、各节正文、参考概述、参考文献和搜索URL清单"
+    )
 
     return {
         "status": "completed",

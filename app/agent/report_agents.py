@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 
 from pydantic import Field, model_validator
 
@@ -336,3 +336,129 @@ class TocGeneratorAgent(ToolCallAgent):
             f"现在请为'{self.topic}'主题生成5章x3节的专业目录："
         )
         return self
+
+
+class SubsectionContentAgent(BaseAgent):
+    """小节内容生成Agent，只生成某一章的某个小节正文。
+
+    - 先可选进行 Web 搜索获取素材
+    - 再调用底层 LLM 直接生成纯正文（不含任何系统前缀或小节标题）
+    """
+
+    name: str = "subsection_writer"
+    description: str = "Subsection content generator for a specific chapter subsection"
+
+    language: str = Field(default="zh")
+    topic: str = Field(..., description="报告主题")
+    chapter_number: int = Field(..., description="章节编号")
+    chapter_title: str = Field(..., description="章节标题")
+    subsection_code: str = Field(..., description="小节编号，如 1.1")
+    subsection_title: str = Field(..., description="小节标题")
+    reference_summary: Optional[str] = Field(default=None, description="参考资料摘要")
+    previous_chapters: Optional[str] = Field(default=None, description="前序章节摘要")
+
+    _search_results: Optional[str] = None
+    viewed_urls: List[str] = Field(default_factory=list, description="本小节搜索阶段查看的URL列表")
+    _content_generated: bool = False
+    max_steps: int = 3
+
+    async def step(self) -> str:
+        try:
+            # Step 1: Web search (optional)
+            if self._search_results is None:
+                search_prompt = (
+                    f"为报告'{self.topic}'第{self.chapter_number}章'{self.chapter_title}'的{self.subsection_code} '{self.subsection_title}'搜索相关信息。"
+                    f"请检索最新数据、案例和统计信息，简要输出关键要点。"
+                )
+                web_search_tool = WebSearch()
+                try:
+                    self._search_results = await web_search_tool.execute(query=search_prompt)
+                    # Try to collect URLs from structured response or rendered text
+                    urls: List[str] = []
+                    try:
+                        if hasattr(self._search_results, "results") and self._search_results.results:
+                            urls = [getattr(r, "url", "") for r in self._search_results.results if getattr(r, "url", "")]
+                        else:
+                            import re as _re
+                            urls = _re.findall(r"https?://[^\s)]+", str(self._search_results))
+                    except Exception:
+                        pass
+                    if urls:
+                        # de-duplicate while preserving order
+                        seen = set()
+                        self.viewed_urls.extend([u for u in urls if not (u in seen or seen.add(u))])
+                    return f"已搜索{self.subsection_code}相关信息"
+                except Exception:
+                    self._search_results = ""
+                    return f"搜索{self.subsection_code}相关信息失败，继续撰写内容"
+
+            # Step 2: Generate subsection content
+            elif not self._content_generated:
+                target_words = min(getattr(config.document_config, "min_section_words", 1200), 1200) // 2
+                content_prompt = (
+                    f"你是专业的报告撰稿人，现仅撰写报告的一个小节正文。\n\n"
+                    f"报告主题：{self.topic}\n"
+                    f"所属章节：第{self.chapter_number}章 {self.chapter_title}\n"
+                    f"当前小节：{self.subsection_code} {self.subsection_title}\n"
+                    f"前序章节摘要：{self.previous_chapters or '无'}\n"
+                    f"参考资料摘要：{self.reference_summary or '无'}\n"
+                    f"搜索结果：{self._search_results or '无'}\n\n"
+                    f"写作要求：\n"
+                    f"1. 长度：不少于{target_words}字，分2-3个自然段\n"
+                    f"2. 专业准确：给出关键事实/数据/案例（如有）\n"
+                    f"3. 逻辑清晰：围绕该小节标题展开\n"
+                    f"4. 输出语言：{self.language}\n\n"
+                    f"重要：只输出该小节的正文内容，不要包含任何标题、编号、提示或系统信息。"
+                )
+
+                content_result = await self.llm.ask(
+                    messages=[{"role": "user", "content": content_prompt}],
+                    stream=False,
+                    temperature=0.3,
+                )
+
+                if isinstance(content_result, str):
+                    content = self._clean_content(content_result.strip())
+                    self._final_content = content
+                    self._content_generated = True
+                    self.state = AgentState.FINISHED
+                    return f"已生成{self.subsection_code}内容"
+                return "小节内容生成失败，请手动补充。"
+
+            # Step 3: Return final
+            else:
+                if hasattr(self, "_final_content"):
+                    return self._final_content
+                return "小节内容生成未完成"
+
+        except Exception as e:
+            return f"{self.subsection_code}内容生成出错：{str(e)}，请手动补充。"
+
+    def _clean_content(self, content: str) -> str:
+        prefixes_to_remove = [
+            "Step 1:", "Step 2:", "Step 3:",
+            "Observed output of cmd",
+            "Terminated:",
+            "ChapterContentAgent:",
+            "Assistant:"
+        ]
+        for prefix in prefixes_to_remove:
+            if content.startswith(prefix):
+                content = content[len(prefix):].strip()
+
+        lines = content.split('\n')
+        clean_lines = []
+        for line in lines:
+            line = line.strip()
+            if not any(marker in line for marker in [
+                "Observed output", "executed:", "Search results for",
+                "URL:", "Description:", "听", "问题分析中"
+            ]):
+                clean_lines.append(line)
+        return '\n'.join(clean_lines).strip()
+
+    async def run(self, input_text: str = "") -> str:
+        execution_log = await super().run(input_text)
+        if hasattr(self, "_final_content"):
+            return self._final_content
+        return execution_log
