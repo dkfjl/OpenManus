@@ -8,6 +8,13 @@ class PPTOutlineResponse(BaseModel):
     outline: List[Dict[str, Any]] = Field(
         default_factory=list, description="PPT大纲项目列表"
     )
+    # 自收敛模式新增：会话与收敛标志（向后兼容，可空）
+    session_id: Optional[str] = Field(
+        default=None, description="自收敛模式：会话ID，用于前端轮询"
+    )
+    is_completed: Optional[bool] = Field(
+        default=None, description="自收敛模式：是否已收敛完成"
+    )
     enhanced_outline_status: str = Field(
         default="pending",
         description="增强版大纲状态：pending/processing/completed/failed",
@@ -21,4 +28,3 @@ class PPTOutlineResponse(BaseModel):
     reference_sources: List[str] = Field(
         default_factory=list, description="参考文件源列表"
     )
-

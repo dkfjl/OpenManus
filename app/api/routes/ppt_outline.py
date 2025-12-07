@@ -11,7 +11,8 @@ from app.services.file_upload_service import (
     get_file_contents_by_uuids,
 )
 from app.services.ppt_outline_service import generate_ppt_outline_with_format
-from app.utils.async_tasks import get_enhanced_outline_status
+from app.services.outline_state_engine import outline_state_engine
+from app.utils.async_tasks import get_enhanced_outline_status, create_enhanced_outline_task
 
 from app.schemas.ppt_outline import PPTOutlineResponse
 
@@ -25,6 +26,13 @@ async def generate_ppt_outline_endpoint(
     file_uuids: Optional[str] = Form(
         default=None,
         description="已上传文件的UUID列表，用逗号分隔，例如: uuid1,uuid2,uuid3",
+    ),
+    session_id: Optional[str] = Form(
+        default=None, description="自收敛模式：会话ID，首次请求不传"
+    ),
+    mode: Optional[str] = Form(
+        default="legacy",
+        description="运行模式：legacy(默认，单次生成) / convergent(自收敛轮询)",
     ),
 ) -> PPTOutlineResponse:
     start_time = time.time()
@@ -52,6 +60,53 @@ async def generate_ppt_outline_endpoint(
                 reference_content = ""
                 reference_sources = []
 
+        # 自收敛模式：通过状态引擎推动一步并返回
+        if (mode or "legacy").lower() == "convergent":
+            step_result, is_completed, new_session_id = await outline_state_engine.process_request(
+                topic=topic.strip(),
+                session_id=session_id,
+                language=language or "zh",
+                reference_content=reference_content,
+                reference_sources=reference_sources,
+            )
+
+            execution_time = time.time() - start_time
+            # 收敛时自动触发增强版生成
+            enhanced_uuid = None
+            enhanced_status = EnhancedOutlineStatus.PENDING
+            if is_completed:
+                try:
+                    enhanced_uuid = await enhanced_outline_storage.create_outline_record(
+                        topic=topic.strip(), language=language or "zh", reference_sources=reference_sources
+                    )
+                    # 这里 original_outline 简化为空列表；增强版生成逻辑主要依赖 topic/language/reference_content
+                    await create_enhanced_outline_task(
+                        original_outline=[],
+                        topic=topic.strip(),
+                        language=language or "zh",
+                        reference_content=reference_content,
+                        reference_sources=reference_sources,
+                        enhanced_uuid=enhanced_uuid,
+                    )
+                    enhanced_status = EnhancedOutlineStatus.PROCESSING
+                except Exception as e:
+                    logger.error(f"Failed to start enhanced outline (convergent): {str(e)}")
+                    enhanced_status = EnhancedOutlineStatus.FAILED
+
+            return PPTOutlineResponse(
+                status="success",
+                outline=[step_result],
+                session_id=new_session_id,
+                is_completed=is_completed,
+                enhanced_outline_status=enhanced_status,
+                enhanced_outline_uuid=enhanced_uuid,
+                topic=topic.strip(),
+                language=language or "zh",
+                execution_time=execution_time,
+                reference_sources=reference_sources,
+            )
+
+        # 兼容旧模式：一次性生成 + 异步增强版
         result = await generate_ppt_outline_with_format(
             topic=topic.strip(),
             language=language or "zh",
@@ -75,6 +130,8 @@ async def generate_ppt_outline_endpoint(
         return PPTOutlineResponse(
             status=result["status"],
             outline=outline_dicts,
+            session_id=None,
+            is_completed=None,
             enhanced_outline_status=result["enhanced_outline_status"],
             enhanced_outline_uuid=result["enhanced_outline_uuid"],
             topic=result["topic"],
