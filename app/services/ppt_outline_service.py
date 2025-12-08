@@ -65,6 +65,8 @@ async def generate_ppt_outline_with_format(
 
         # 解析和验证返回的JSON
         outline_items = _parse_outline_response(response, topic, language)
+        # 统一质量后处理：限制每项子步骤 ≤5，且至少一个带详情
+        outline_items = _enforce_outline_quality(outline_items, topic, language)
 
         execution_time = time.time() - start_time
 
@@ -290,10 +292,10 @@ def _parse_outline_response(
     except json.JSONDecodeError as e:
         logger.error(f"JSON parsing failed: {str(e)}")
         # 返回fallback大纲
-        return _create_fallback_outline(topic, language)
+        return _enforce_outline_quality(_create_fallback_outline(topic, language), topic, language)
     except Exception as e:
         logger.error(f"Outline parsing failed: {str(e)}")
-        return _create_fallback_outline(topic, language)
+        return _enforce_outline_quality(_create_fallback_outline(topic, language), topic, language)
 
 
 def _create_fallback_outline(topic: str, language: str) -> List[PPTOutlineItem]:
@@ -503,3 +505,36 @@ def _create_fallback_outline(topic: str, language: str) -> List[PPTOutlineItem]:
         outline_items.append(outline_item)
 
     return outline_items
+
+
+def _enforce_outline_quality(
+    items: List[PPTOutlineItem], topic: str, language: str
+) -> List[PPTOutlineItem]:
+    """后处理（legacy 模式）：
+    - 限制每个 item.meta.substeps ≤ 5
+    - showDetail 仅参照 thinking_steps 的规则：偶数位为 True，其余为 False
+    - 不改变 detailType/detailPayload 的取值（保持模型原样）
+    """
+
+    allowed_types = ["table", "image", "list", "code", "diagram"]
+    for item in items:
+        if item.meta and item.meta.substeps:
+            # 限制数量到 5
+            item.meta.substeps = item.meta.substeps[:5]
+            # 设置 showDetail：从 1 开始计数，偶数项 True
+            for i, s in enumerate(item.meta.substeps, start=1):
+                s.showDetail = (i % 2 == 0)
+                if s.showDetail:
+                    # detailType：若已有且合法则保留，否则从允许集合轮询选择
+                    dt_existing = getattr(s, "detailType", None)
+                    dt = dt_existing if isinstance(dt_existing, str) and dt_existing in allowed_types else allowed_types[(i - 1) % len(allowed_types)]
+                    s.detailType = dt
+                    # detailPayload：若缺失或类型不合法则填充最小可用
+                    payload = getattr(s, "detailPayload", None)
+                    ptype = payload.get("type") if isinstance(payload, dict) else None
+                    if not isinstance(payload, dict) or ptype not in allowed_types:
+                        heading = s.text or item.title
+                        base = item.meta.summary or item.description or item.title
+                        s.detailPayload = {"type": dt, "data": f"### {heading}\n{base}"}
+
+    return items

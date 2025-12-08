@@ -5,16 +5,18 @@ from fastapi import APIRouter, Form, HTTPException
 
 from app.enhanced_schema import EnhancedOutlineResponse, EnhancedOutlineStatus
 from app.logger import logger
+from app.schemas.ppt_outline import PPTOutlineResponse
 from app.services.enhanced_outline_storage import enhanced_outline_storage
 from app.services.file_upload_service import (
     file_upload_service,
     get_file_contents_by_uuids,
 )
-from app.services.ppt_outline_service import generate_ppt_outline_with_format
 from app.services.outline_state_engine import outline_state_engine
-from app.utils.async_tasks import get_enhanced_outline_status, create_enhanced_outline_task
-
-from app.schemas.ppt_outline import PPTOutlineResponse
+from app.services.ppt_outline_service import generate_ppt_outline_with_format
+from app.utils.async_tasks import (
+    create_enhanced_outline_task,
+    get_enhanced_outline_status,
+)
 
 router = APIRouter()
 
@@ -48,7 +50,8 @@ def _normalize_convergent_step_to_outline_item(
     # 提取 summary 与 substeps
     summary: Optional[str] = None
     substeps: List[Dict[str, Any]] = []
-    SUBSTEP_CAP = 8
+    # 每个步骤最多 5 个子步骤
+    SUBSTEP_CAP = 5
 
     def add_substep(
         text: str,
@@ -66,10 +69,11 @@ def _normalize_convergent_step_to_outline_item(
             {
                 "key": f"{step}-{len(substeps) + 1}",
                 "text": text[:160],
-                "showDetail": bool(show_detail),
+                # showDetail 将在最终阶段统一设置（参考 thinking_steps 规则）
+                "showDetail": False,
                 # 始终输出 detailType/detailPayload（即便为 null）
-                "detailType": detail_type,
-                "detailPayload": detail_payload,
+                "detailType": None,
+                "detailPayload": None,
             }
         )
 
@@ -100,20 +104,8 @@ def _normalize_convergent_step_to_outline_item(
                                         or it.get("title")
                                         or it.get("text")
                                     )
-                                    details_txt = it.get("details") or it.get("detail")
                                     if isinstance(point_txt, str):
-                                        if isinstance(details_txt, str) and details_txt.strip():
-                                            add_substep(
-                                                point_txt,
-                                                show_detail=True,
-                                                detail_type="markdown",
-                                                detail_payload={
-                                                    "type": "markdown",
-                                                    "data": details_txt.strip(),
-                                                },
-                                            )
-                                        else:
-                                            add_substep(point_txt)
+                                        add_substep(point_txt)
                                 elif isinstance(it, str):
                                     add_substep(it)
                     elif isinstance(ch, str):
@@ -124,20 +116,8 @@ def _normalize_convergent_step_to_outline_item(
                 for it in obj.get("items", []):
                     if isinstance(it, dict):
                         txt = it.get("point") or it.get("title") or it.get("text")
-                        details_txt = it.get("details") or it.get("detail")
                         if isinstance(txt, str):
-                            if isinstance(details_txt, str) and details_txt.strip():
-                                add_substep(
-                                    txt,
-                                    show_detail=True,
-                                    detail_type="markdown",
-                                    detail_payload={
-                                        "type": "markdown",
-                                        "data": details_txt.strip(),
-                                    },
-                                )
-                            else:
-                                add_substep(txt)
+                            add_substep(txt)
                     elif isinstance(it, str):
                         add_substep(it)
 
@@ -145,20 +125,8 @@ def _normalize_convergent_step_to_outline_item(
                 for it in obj.get("points", []):
                     if isinstance(it, dict):
                         txt = it.get("title") or it.get("text")
-                        details_txt = it.get("details") or it.get("detail")
                         if isinstance(txt, str):
-                            if isinstance(details_txt, str) and details_txt.strip():
-                                add_substep(
-                                    txt,
-                                    show_detail=True,
-                                    detail_type="markdown",
-                                    detail_payload={
-                                        "type": "markdown",
-                                        "data": details_txt.strip(),
-                                    },
-                                )
-                            else:
-                                add_substep(txt)
+                            add_substep(txt)
                     elif isinstance(it, str):
                         add_substep(it)
 
@@ -216,6 +184,32 @@ def _normalize_convergent_step_to_outline_item(
         for txt in placeholders:
             add_substep(txt)
 
+    # 截断到最多 5 条
+    if len(substeps) > SUBSTEP_CAP:
+        substeps = substeps[:SUBSTEP_CAP]
+
+    # 仅参照 thinking_steps 的规则设置 showDetail：偶数项 True，其它 False
+    allowed_types = ["table", "image", "list", "code", "diagram"]
+    for idx, s in enumerate(substeps, start=1):
+        s["showDetail"] = idx % 2 == 0
+        if s["showDetail"]:
+            # detailType 优先使用现有且在允许列表内，否则按轮询分配
+            dt_existing = s.get("detailType")
+            dt = (
+                dt_existing
+                if isinstance(dt_existing, str) and dt_existing in allowed_types
+                else allowed_types[(idx - 1) % len(allowed_types)]
+            )
+            s["detailType"] = dt
+            # detailPayload：若不存在或类型不在允许范围，按 dt 填充一个最小可用的数据包
+            payload = s.get("detailPayload") or {}
+            ptype = payload.get("type") if isinstance(payload, dict) else None
+            if not isinstance(payload, dict) or ptype not in allowed_types:
+                base = summary or description or title
+                heading = s.get("text") or title
+                data = f"### {heading}\n{base}"
+                s["detailPayload"] = {"type": dt, "data": data}
+
     return {
         "key": str(step),  # 0 基
         "title": title,
@@ -223,6 +217,7 @@ def _normalize_convergent_step_to_outline_item(
         "detailType": "markdown",
         "meta": {"summary": summary, "substeps": substeps},
     }
+
 
 @router.post("/api/ppt-outline/generate", response_model=PPTOutlineResponse)
 async def generate_ppt_outline_endpoint(
@@ -256,9 +251,13 @@ async def generate_ppt_outline_endpoint(
                 if uuid_list:
                     reference_content = await get_file_contents_by_uuids(uuid_list)
                     for uuid_str in uuid_list:
-                        file_info = file_upload_service.get_file_info_by_uuid(uuid_str.strip())
+                        file_info = file_upload_service.get_file_info_by_uuid(
+                            uuid_str.strip()
+                        )
                         reference_sources.append(
-                            file_info.original_name if file_info else f"UUID文件{uuid_str}"
+                            file_info.original_name
+                            if file_info
+                            else f"UUID文件{uuid_str}"
                         )
             except Exception as e:
                 logger.warning(f"UUID文件处理失败，将继续无参考材料生成: {str(e)}")
@@ -267,12 +266,14 @@ async def generate_ppt_outline_endpoint(
 
         # 自收敛模式：通过状态引擎推动一步并返回
         if (mode or "legacy").lower() == "convergent":
-            step_result, is_completed, new_session_id = await outline_state_engine.process_request(
-                topic=topic.strip(),
-                session_id=session_id,
-                language=language or "zh",
-                reference_content=reference_content,
-                reference_sources=reference_sources,
+            step_result, is_completed, new_session_id = (
+                await outline_state_engine.process_request(
+                    topic=topic.strip(),
+                    session_id=session_id,
+                    language=language or "zh",
+                    reference_content=reference_content,
+                    reference_sources=reference_sources,
+                )
             )
 
             execution_time = time.time() - start_time
@@ -281,8 +282,12 @@ async def generate_ppt_outline_endpoint(
             enhanced_status = EnhancedOutlineStatus.PENDING
             if is_completed:
                 try:
-                    enhanced_uuid = await enhanced_outline_storage.create_outline_record(
-                        topic=topic.strip(), language=language or "zh", reference_sources=reference_sources
+                    enhanced_uuid = (
+                        await enhanced_outline_storage.create_outline_record(
+                            topic=topic.strip(),
+                            language=language or "zh",
+                            reference_sources=reference_sources,
+                        )
                     )
                     # 这里 original_outline 简化为空列表；增强版生成逻辑主要依赖 topic/language/reference_content
                     await create_enhanced_outline_task(
@@ -295,7 +300,9 @@ async def generate_ppt_outline_endpoint(
                     )
                     enhanced_status = EnhancedOutlineStatus.PROCESSING
                 except Exception as e:
-                    logger.error(f"Failed to start enhanced outline (convergent): {str(e)}")
+                    logger.error(
+                        f"Failed to start enhanced outline (convergent): {str(e)}"
+                    )
                     enhanced_status = EnhancedOutlineStatus.FAILED
 
             # 规范化为单个 PPTOutlineItem 字典返回
@@ -367,7 +374,10 @@ async def get_enhanced_outline_endpoint(uuid: str) -> EnhancedOutlineResponse:
         if status_info["status"] == "not_found":
             raise HTTPException(status_code=404, detail="增强版大纲未找到")
         if status_info["status"] == "error":
-            raise HTTPException(status_code=500, detail=f"获取增强版大纲失败: {status_info.get('error_message', '未知错误')}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"获取增强版大纲失败: {status_info.get('error_message', '未知错误')}",
+            )
         if status_info["status"] == EnhancedOutlineStatus.FAILED:
             error_msg = status_info.get("error_message", "增强版大纲生成失败")
             return EnhancedOutlineResponse(
@@ -435,7 +445,10 @@ async def get_enhanced_outline_status_endpoint(uuid: str):
         if status_info["status"] == "not_found":
             raise HTTPException(status_code=404, detail="增强版大纲未找到")
         if status_info["status"] == "error":
-            raise HTTPException(status_code=500, detail=f"查询状态失败: {status_info.get('error_message', '未知错误')}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"查询状态失败: {status_info.get('error_message', '未知错误')}",
+            )
         return {
             "uuid": uuid,
             "status": status_info["status"],
@@ -454,15 +467,24 @@ async def get_enhanced_outline_status_endpoint(uuid: str):
 
 
 @router.get("/api/ppt-outline/enhanced")
-async def list_enhanced_outlines(status: Optional[str] = None, limit: int = 50, offset: int = 0):
+async def list_enhanced_outlines(
+    status: Optional[str] = None, limit: int = 50, offset: int = 0
+):
     try:
         all_outlines = enhanced_outline_storage.get_all_outlines()
         filtered_outlines = (
-            [o for o in all_outlines if o["status"] == status] if status else all_outlines
+            [o for o in all_outlines if o["status"] == status]
+            if status
+            else all_outlines
         )
         total_count = len(filtered_outlines)
         paginated_outlines = filtered_outlines[offset : offset + limit]
-        return {"total_count": total_count, "outlines": paginated_outlines, "limit": limit, "offset": offset}
+        return {
+            "total_count": total_count,
+            "outlines": paginated_outlines,
+            "limit": limit,
+            "offset": offset,
+        }
     except Exception as e:
         logger.error(f"Failed to list enhanced outlines: {str(e)}")
         raise HTTPException(status_code=500, detail=f"获取增强版大纲列表失败: {str(e)}")
