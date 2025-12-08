@@ -1,5 +1,5 @@
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Form, HTTPException
 
@@ -18,6 +18,211 @@ from app.schemas.ppt_outline import PPTOutlineResponse
 
 router = APIRouter()
 
+
+def _normalize_convergent_step_to_outline_item(
+    step_result: Dict[str, Any], *, topic: str, language: str
+) -> Dict[str, Any]:
+    """
+    将状态引擎单步结果规范化为前端需要的 PPTOutlineItem 结构。
+    约定：
+    - key 从 0 开始，使用 step 作为字符串
+    - title 使用 step_name（保持结构为主）
+    - description/summary 做轻量本地化
+    - substeps 优先从 content 的 chapters/items/sections/points 提取
+    - 在“最终完善与总结”收敛步，同样返回一个 PPTOutlineItem
+    """
+
+    def _localized_text(zh: str, en: str) -> str:
+        return zh if (language or "zh").lower().startswith("zh") else en
+
+    step = int(step_result.get("step", 0))
+    step_name = str(step_result.get("step_name") or f"步骤{step}")
+    content = step_result.get("content", {})
+
+    title = step_name
+    description = _localized_text(
+        f"围绕「{topic}」的{step_name}。",
+        f"{step_name} for '{topic}'.",
+    )
+
+    # 提取 summary 与 substeps
+    summary: Optional[str] = None
+    substeps: List[Dict[str, Any]] = []
+    SUBSTEP_CAP = 8
+
+    def add_substep(
+        text: str,
+        *,
+        show_detail: bool = False,
+        detail_type: Optional[str] = None,
+        detail_payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        text = (text or "").strip()
+        if not text:
+            return
+        if len(substeps) >= SUBSTEP_CAP:
+            return
+        substeps.append(
+            {
+                "key": f"{step}-{len(substeps) + 1}",
+                "text": text[:160],
+                "showDetail": bool(show_detail),
+                # 始终输出 detailType/detailPayload（即便为 null）
+                "detailType": detail_type,
+                "detailPayload": detail_payload,
+            }
+        )
+
+    def traverse_extract(obj: Any) -> None:
+        if len(substeps) >= SUBSTEP_CAP:
+            return
+        if isinstance(obj, dict):
+            nonlocal summary
+            # 直接命中的 summary 字段
+            if summary is None and isinstance(obj.get("summary"), str):
+                cand = obj.get("summary", "").strip()
+                if cand:
+                    summary = cand
+
+            # 优先解析章节/条目结构
+            if isinstance(obj.get("chapters"), list):
+                for ch in obj.get("chapters", []):
+                    if isinstance(ch, dict):
+                        if isinstance(ch.get("title"), str):
+                            # 章节标题作为一个子步骤（无详情）
+                            add_substep(ch.get("title"))
+                        items = ch.get("items")
+                        if isinstance(items, list):
+                            for it in items:
+                                if isinstance(it, dict):
+                                    point_txt = (
+                                        it.get("point")
+                                        or it.get("title")
+                                        or it.get("text")
+                                    )
+                                    details_txt = it.get("details") or it.get("detail")
+                                    if isinstance(point_txt, str):
+                                        if isinstance(details_txt, str) and details_txt.strip():
+                                            add_substep(
+                                                point_txt,
+                                                show_detail=True,
+                                                detail_type="markdown",
+                                                detail_payload={
+                                                    "type": "markdown",
+                                                    "data": details_txt.strip(),
+                                                },
+                                            )
+                                        else:
+                                            add_substep(point_txt)
+                                elif isinstance(it, str):
+                                    add_substep(it)
+                    elif isinstance(ch, str):
+                        add_substep(ch)
+
+            # items / points 直接为列表时
+            if isinstance(obj.get("items"), list):
+                for it in obj.get("items", []):
+                    if isinstance(it, dict):
+                        txt = it.get("point") or it.get("title") or it.get("text")
+                        details_txt = it.get("details") or it.get("detail")
+                        if isinstance(txt, str):
+                            if isinstance(details_txt, str) and details_txt.strip():
+                                add_substep(
+                                    txt,
+                                    show_detail=True,
+                                    detail_type="markdown",
+                                    detail_payload={
+                                        "type": "markdown",
+                                        "data": details_txt.strip(),
+                                    },
+                                )
+                            else:
+                                add_substep(txt)
+                    elif isinstance(it, str):
+                        add_substep(it)
+
+            if isinstance(obj.get("points"), list):
+                for it in obj.get("points", []):
+                    if isinstance(it, dict):
+                        txt = it.get("title") or it.get("text")
+                        details_txt = it.get("details") or it.get("detail")
+                        if isinstance(txt, str):
+                            if isinstance(details_txt, str) and details_txt.strip():
+                                add_substep(
+                                    txt,
+                                    show_detail=True,
+                                    detail_type="markdown",
+                                    detail_payload={
+                                        "type": "markdown",
+                                        "data": details_txt.strip(),
+                                    },
+                                )
+                            else:
+                                add_substep(txt)
+                    elif isinstance(it, str):
+                        add_substep(it)
+
+            # 递归遍历其它字段，避免对已处理键（chapters/items/points/summary）重复处理
+            for k, v in obj.items():
+                if k in {"chapters", "items", "points", "summary"}:
+                    continue
+                traverse_extract(v)
+        elif isinstance(obj, list):
+            for el in obj:
+                traverse_extract(el)
+        elif isinstance(obj, str):
+            # 从纯文本中粗抽要点（前几行非空文本）
+            if len(substeps) < 3:
+                lines = [ln.strip("-•* \t") for ln in obj.splitlines() if ln.strip()]
+                for ln in lines:
+                    if len(ln) >= 6:
+                        add_substep(ln)
+                        if len(substeps) >= SUBSTEP_CAP:
+                            break
+
+    # 收敛步：content 结构为 {"summary": {...或str}, "final": <任意>}
+    if isinstance(content, dict) and "final" in content:
+        summ = content.get("summary")
+        if isinstance(summ, str) and summ.strip():
+            summary = summ.strip()
+        elif isinstance(summ, dict):
+            total = summ.get("total_steps")
+            avg = summ.get("avg_quality")
+            summary = _localized_text(
+                f"已收敛，共 {total} 步，平均质量 {avg}。",
+                f"Converged after {total} steps, average quality {avg}.",
+            )
+        traverse_extract(content.get("final"))
+    else:
+        traverse_extract(content)
+
+    if not summary:
+        summary = _localized_text(
+            f"{step_name}：围绕「{topic}」梳理关键要点。",
+            f"{step_name}: Key points for '{topic}'.",
+        )
+
+    if not substeps:
+        # 无结构时的保底子步骤
+        placeholders = (
+            [f"{step_name}—要点1", f"{step_name}—要点2", f"{step_name}—要点3"]
+            if (language or "zh").lower().startswith("zh")
+            else [
+                f"{step_name} - point 1",
+                f"{step_name} - point 2",
+                f"{step_name} - point 3",
+            ]
+        )
+        for txt in placeholders:
+            add_substep(txt)
+
+    return {
+        "key": str(step),  # 0 基
+        "title": title,
+        "description": description,
+        "detailType": "markdown",
+        "meta": {"summary": summary, "substeps": substeps},
+    }
 
 @router.post("/api/ppt-outline/generate", response_model=PPTOutlineResponse)
 async def generate_ppt_outline_endpoint(
@@ -93,9 +298,16 @@ async def generate_ppt_outline_endpoint(
                     logger.error(f"Failed to start enhanced outline (convergent): {str(e)}")
                     enhanced_status = EnhancedOutlineStatus.FAILED
 
+            # 规范化为单个 PPTOutlineItem 字典返回
+            normalized_item = _normalize_convergent_step_to_outline_item(
+                step_result,
+                topic=topic.strip(),
+                language=language or "zh",
+            )
+
             return PPTOutlineResponse(
                 status="success",
-                outline=[step_result],
+                outline=[normalized_item],
                 session_id=new_session_id,
                 is_completed=is_completed,
                 enhanced_outline_status=enhanced_status,
