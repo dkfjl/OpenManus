@@ -74,6 +74,14 @@ def create_app() -> FastAPI:
         app.include_router(files_router)
     except Exception as e:  # pragma: no cover
         logger.warning(f"Optional files router not loaded: {e}")
+
+    # Chat data insertion API
+    try:
+        from app.api.routes.chat import router as chat_router  # type: ignore
+
+        app.include_router(chat_router)
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"Optional chat router not loaded: {e}")
     return app
 
 

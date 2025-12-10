@@ -246,6 +246,22 @@ class DifyKnowledgeBaseSettings(BaseModel):
     )
 
 
+class ChatInsertSettings(BaseModel):
+    """Configuration for chat data insertion (DB + pricing)."""
+
+    database_url: str = Field(
+        "mysql+aiomysql://root:password@127.0.0.1:3306/openmanus",
+        description="SQLAlchemy async URL (aiomysql)",
+    )
+    token_estimation_enabled: bool = Field(
+        False, description="Enable token estimation for pricing"
+    )
+    price_per_1000_tokens: float = Field(
+        0.0, description="Price per 1000 tokens"
+    )
+    currency: str = Field("USD", description="Pricing currency code")
+
+
 class AIPPTSettings(BaseModel):
     """Configuration for AIPPT third-party API"""
     base_url: str = Field(
@@ -412,6 +428,10 @@ class AppConfig(BaseModel):
         None,
         description="Dify knowledge base configuration"
     )
+    chat_insert_config: ChatInsertSettings = Field(
+        default_factory=ChatInsertSettings,
+        description="Chat data insertion configuration",
+    )
 
     class Config:
         arbitrary_types_allowed = True
@@ -572,6 +592,9 @@ class Config:
             dify_settings = DifyKnowledgeBaseSettings(**dify_config)
         else:
             dify_settings = DifyKnowledgeBaseSettings()
+        chat_cfg = raw_config.get("chat", {})
+        chat_settings = ChatInsertSettings(**chat_cfg) if chat_cfg else ChatInsertSettings()
+
         config_dict = {
             "llm": {
                 "default": default_settings,
@@ -591,6 +614,7 @@ class Config:
             "knowledge_base_config": knowledge_base_settings,
             "image_search_config": image_search_settings,
             "dify_config": dify_settings,
+            "chat_insert_config": chat_settings,
         }
 
         self._config = AppConfig(**config_dict)
@@ -648,6 +672,11 @@ class Config:
     def dify(self) -> Optional[DifyKnowledgeBaseSettings]:
         """Get Dify knowledge base configuration"""
         return self._config.dify_config
+
+    @property
+    def chat(self) -> ChatInsertSettings:
+        """Chat data insertion configuration"""
+        return self._config.chat_insert_config
 
     @property
     def workspace_root(self) -> Path:
