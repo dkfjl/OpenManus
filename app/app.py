@@ -33,6 +33,15 @@ def create_app() -> FastAPI:
         cleanup_task = await start_periodic_cleanup()
         if cleanup_task:
             logger.info("Started periodic cleanup task for enhanced outlines")
+
+        # Initialize report storage database
+        try:
+            from app.report_storage_db.session import init_db
+            await init_db()
+            logger.info("Report storage database initialized")
+        except Exception as e:
+            logger.warning(f"Failed to initialize report storage database: {e}")
+
         logger.info("OpenManus service started, ready to accept requests.")
 
     # Routers
@@ -82,6 +91,15 @@ def create_app() -> FastAPI:
         app.include_router(chat_router)
     except Exception as e:  # pragma: no cover
         logger.warning(f"Optional chat router not loaded: {e}")
+
+    # Report file storage API
+    try:
+        from app.api.routes.report_files import router as report_files_router  # type: ignore
+
+        app.include_router(report_files_router)
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"Optional report_files router not loaded: {e}")
+
     return app
 
 

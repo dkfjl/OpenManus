@@ -1,7 +1,8 @@
 import time
 from typing import Optional
+from pathlib import Path
 
-from fastapi import APIRouter, Form, HTTPException
+from fastapi import APIRouter, Form, HTTPException, Depends
 
 from app.schemas.report import ReportResult
 from app.logger import logger
@@ -16,6 +17,10 @@ from app.services.file_upload_service import (
 )
 from app.services.report_generation_service import generate_report_from_steps
 
+# 导入对象存储相关
+from app.services.report_file_service import ReportFileService
+from app.api.deps.report_file_deps import get_report_file_service
+
 router = APIRouter()
 
 
@@ -27,6 +32,8 @@ async def generate_report_endpoint(
         default=None,
         description="已上传文件的UUID列表，用逗号分隔，例如: uuid1,uuid2,uuid3",
     ),
+    user_id: str = Form(default="default_user", description="用户ID"),  # TODO: 从认证中获取
+    report_file_service: Optional[ReportFileService] = Depends(get_report_file_service),
 ) -> ReportResult:
     log_session = start_execution_log(
         flow_type="report_generation",
@@ -110,15 +117,74 @@ async def generate_report_endpoint(
                 "total_duration_sec": round(time.perf_counter() - t0, 3),
             },
         )
+
+        # 尝试上传到对象存储
+        file_uuid = None
+        preview_url = None
+        download_url = None
+        storage_enabled = False
+
+        if report_file_service:
+            try:
+                t_upload = time.perf_counter()
+                log_execution_event("storage_upload", "Uploading report to object storage", {})
+
+                filepath = result.get("filepath")
+                if filepath and Path(filepath).exists():
+                    # 上传文件到对象存储
+                    file_uuid = await report_file_service.upload_report_file(
+                        file_path=Path(filepath),
+                        original_filename=Path(filepath).name,
+                        user_id=user_id,
+                        expire_days=30
+                    )
+
+                    # 生成预览和下载URL路径（相对路径）
+                    preview_url = f"/api/reports/{file_uuid}/preview"
+                    download_url = f"/api/reports/{file_uuid}/download"
+                    storage_enabled = True
+
+                    log_execution_event(
+                        "storage_upload",
+                        "Report uploaded to object storage successfully",
+                        {
+                            "file_uuid": file_uuid,
+                            "preview_url": preview_url,
+                            "upload_duration_sec": round(time.perf_counter() - t_upload, 3),
+                        },
+                    )
+                    logger.info(f"Report uploaded to storage: uuid={file_uuid}, preview_url={preview_url}")
+                else:
+                    logger.warning(f"Report file not found at {filepath}, skipping storage upload")
+
+            except Exception as storage_error:
+                # 对象存储上传失败不影响报告生成结果
+                logger.error(f"Failed to upload report to object storage: {storage_error}")
+                log_execution_event(
+                    "storage_upload",
+                    "Failed to upload report to object storage",
+                    {"error": str(storage_error)},
+                )
+
         end_execution_log(
             status="completed",
             details={
                 "filepath": result.get("filepath"),
+                "file_uuid": file_uuid,
+                "storage_enabled": storage_enabled,
                 "total_duration_sec": round(time.perf_counter() - t0, 3),
             },
         )
         log_closed = True
-        return ReportResult(**result)
+
+        # 返回扩展的结果
+        return ReportResult(
+            **result,
+            file_uuid=file_uuid,
+            preview_url=preview_url,
+            download_url=download_url,
+            storage_enabled=storage_enabled,
+        )
     except HTTPException as exc:
         log_execution_event("error", "HTTP error during /api/docx/generate", {"status_code": exc.status_code, "detail": exc.detail})
         end_execution_log(status="failed", details={"status_code": exc.status_code, "detail": exc.detail})

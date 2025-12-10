@@ -246,6 +246,31 @@ class DifyKnowledgeBaseSettings(BaseModel):
     )
 
 
+class StorageSecuritySettings(BaseModel):
+    """Storage security configuration"""
+    private_storage: bool = Field(True, description="Enable private storage")
+    enable_cdn: bool = Field(True, description="Enable CDN acceleration")
+    max_downloads: int = Field(0, description="Max download count (0=unlimited)")
+    enable_access_log: bool = Field(True, description="Enable access logging")
+
+
+class StorageSettings(BaseModel):
+    """Object storage configuration for report files"""
+    type: str = Field("oss", description="Storage type: oss, s3, cos, minio")
+    bucket: str = Field(..., description="Bucket name")
+    region: str = Field("cn-hangzhou", description="Storage region")
+    access_key: str = Field(..., description="Access key")
+    secret_key: str = Field(..., description="Secret key")
+    endpoint: Optional[str] = Field(None, description="Custom endpoint URL")
+    cdn_domain: Optional[str] = Field(None, description="CDN domain (optional)")
+    presign_expire_seconds: int = Field(3600, description="Presigned URL expire time (seconds)")
+    file_expire_days: int = Field(30, description="File expire time (days)")
+    security: StorageSecuritySettings = Field(
+        default_factory=StorageSecuritySettings,
+        description="Security settings"
+    )
+
+
 class ChatInsertSettings(BaseModel):
     """Configuration for chat data insertion (DB + pricing)."""
 
@@ -432,6 +457,10 @@ class AppConfig(BaseModel):
         default_factory=ChatInsertSettings,
         description="Chat data insertion configuration",
     )
+    storage_config: Optional[StorageSettings] = Field(
+        None,
+        description="Object storage configuration for report files"
+    )
 
     class Config:
         arbitrary_types_allowed = True
@@ -595,6 +624,13 @@ class Config:
         chat_cfg = raw_config.get("chat", {})
         chat_settings = ChatInsertSettings(**chat_cfg) if chat_cfg else ChatInsertSettings()
 
+        # Storage configuration
+        storage_cfg = raw_config.get("storage")
+        if storage_cfg:
+            storage_settings = StorageSettings(**storage_cfg)
+        else:
+            storage_settings = None
+
         config_dict = {
             "llm": {
                 "default": default_settings,
@@ -615,6 +651,7 @@ class Config:
             "image_search_config": image_search_settings,
             "dify_config": dify_settings,
             "chat_insert_config": chat_settings,
+            "storage_config": storage_settings,
         }
 
         self._config = AppConfig(**config_dict)
@@ -677,6 +714,11 @@ class Config:
     def chat(self) -> ChatInsertSettings:
         """Chat data insertion configuration"""
         return self._config.chat_insert_config
+
+    @property
+    def storage(self) -> Optional[StorageSettings]:
+        """Get object storage configuration"""
+        return self._config.storage_config
 
     @property
     def workspace_root(self) -> Path:
