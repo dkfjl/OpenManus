@@ -65,8 +65,6 @@ async def generate_ppt_outline_with_format(
 
         # 解析和验证返回的JSON
         outline_items = _parse_outline_response(response, topic, language)
-        # 统一质量后处理：限制每项子步骤 ≤5，且至少一个带详情
-        outline_items = _enforce_outline_quality(outline_items, topic, language)
 
         execution_time = time.time() - start_time
 
@@ -178,14 +176,15 @@ def _build_format_prompt(
 2. 每个步骤必须包含：key、title、description、detailType、meta字段
 3. meta字段必须包含：summary和substeps
 4. substeps是数组，每个子步骤包含：key、text、showDetail，可选的detailType和detailPayload
-5. 严格按照以下示例结构输出：
+5. detailType 必须是以下四种之一：text（文本）、image（图片）、list（列表）、table（表格）
+6. 严格按照以下示例结构输出：
 
 [
     {{
         "key": "0",
         "title": "需求分析与任务拆解",
         "description": "我来为你制作一份专业的{topic}PPT。让我先分析你的需求",
-        "detailType": "markdown",
+        "detailType": "text",
         "meta": {{
             "summary": "自动从输入中提炼目标与约束，形成可执行列表",
             "substeps": [
@@ -195,10 +194,10 @@ def _build_format_prompt(
                     "key": "0-3",
                     "text": "待办清单",
                     "showDetail": true,
-                    "detailType": "markdown",
+                    "detailType": "list",
                     "detailPayload": {{
-                        "type": "markdown",
-                        "data": "### 待办清单\n- [ ] 拟定标题与副标题\n- [ ] 生成PPT目录\n- [ ] 生成各章大纲\n- [ ] 构建PPT主体\n- [ ] 优化版式与内容"
+                        "format": "markdown",
+                        "content": "### 待办清单\n\n- 拟定标题与副标题\n- 生成PPT目录\n- 生成各章大纲\n- 构建PPT主体\n- 优化版式与内容"
                     }}
                 }}
             ]
@@ -210,9 +209,9 @@ def _build_format_prompt(
 {lang_instruction}生成内容
 - 围绕{topic}主题，生成5-8个制作步骤
 - 每个步骤描述PPT制作的具体环节
-- 包含实际的PPT内容规划、设计、制作等流程
-- 在适当步骤中添加markdown格式的详细说明
-- 在生成PPT骨架的步骤中，包含ppt格式的数据结构
+- detailType 根据内容选择：text（文本段落）、list（要点列表）、table（对比表格）、image（配图说明）
+- detailPayload 使用 format="markdown" 和 content 字段
+- 所有内容以 Markdown 格式组织
 
 参考材料：
 {reference_part}
@@ -292,10 +291,10 @@ def _parse_outline_response(
     except json.JSONDecodeError as e:
         logger.error(f"JSON parsing failed: {str(e)}")
         # 返回fallback大纲
-        return _enforce_outline_quality(_create_fallback_outline(topic, language), topic, language)
+        return _create_fallback_outline(topic, language)
     except Exception as e:
         logger.error(f"Outline parsing failed: {str(e)}")
-        return _enforce_outline_quality(_create_fallback_outline(topic, language), topic, language)
+        return _create_fallback_outline(topic, language)
 
 
 def _create_fallback_outline(topic: str, language: str) -> List[PPTOutlineItem]:
@@ -303,10 +302,10 @@ def _create_fallback_outline(topic: str, language: str) -> List[PPTOutlineItem]:
 
     if language == "zh":
         topic_framework = (
-            f"### {topic}PPT框架\n- 封面页\n- 目录页\n- 内容章节\n- 结尾页"
+            f"### {topic} PPT框架\n\n- 封面页\n- 目录页\n- 内容章节\n- 结尾页"
         )
         export_suggestions = (
-            "### 导出建议\n- 保存为PPTX格式\n- 准备PDF备份\n- 检查兼容性"
+            "### 导出建议\n\n- 保存为PPTX格式\n- 准备PDF备份\n- 检查兼容性"
         )
 
         fallback_data = [
@@ -314,7 +313,7 @@ def _create_fallback_outline(topic: str, language: str) -> List[PPTOutlineItem]:
                 "key": "0",
                 "title": "需求分析",
                 "description": f"分析{topic}PPT的制作需求",
-                "detailType": "markdown",
+                "detailType": "text",
                 "meta": {
                     "summary": "分析用户需求，确定PPT制作目标",
                     "substeps": [
@@ -328,10 +327,10 @@ def _create_fallback_outline(topic: str, language: str) -> List[PPTOutlineItem]:
                             "key": "0-3",
                             "text": "确定内容框架",
                             "showDetail": True,
-                            "detailType": "markdown",
+                            "detailType": "list",
                             "detailPayload": {
-                                "type": "markdown",
-                                "data": topic_framework,
+                                "format": "markdown",
+                                "content": topic_framework,
                             },
                         },
                     ],
@@ -341,7 +340,7 @@ def _create_fallback_outline(topic: str, language: str) -> List[PPTOutlineItem]:
                 "key": "1",
                 "title": "内容规划",
                 "description": "规划PPT的具体内容和结构",
-                "detailType": "markdown",
+                "detailType": "text",
                 "meta": {
                     "summary": "制定详细的内容规划和章节安排",
                     "substeps": [
@@ -355,7 +354,7 @@ def _create_fallback_outline(topic: str, language: str) -> List[PPTOutlineItem]:
                 "key": "2",
                 "title": "视觉设计",
                 "description": "设计PPT的视觉风格和版式",
-                "detailType": "markdown",
+                "detailType": "text",
                 "meta": {
                     "summary": "确定视觉风格、配色方案和版式设计",
                     "substeps": [
@@ -367,49 +366,22 @@ def _create_fallback_outline(topic: str, language: str) -> List[PPTOutlineItem]:
             },
             {
                 "key": "3",
-                "title": "PPT制作",
-                "description": "实际制作PPT文件",
-                "detailType": "ppt",
-                "meta": {
-                    "summary": "根据规划制作完整的PPT文件",
-                    "substeps": [
-                        {
-                            "key": "3-1",
-                            "text": "创建封面页",
-                            "showDetail": True,
-                            "detailType": "ppt",
-                            "detailPayload": {
-                                "type": "ppt",
-                                "data": {
-                                    "slide_type": "cover",
-                                    "title": topic,
-                                    "subtitle": "专业演示文稿",
-                                },
-                            },
-                        },
-                        {"key": "3-2", "text": "制作内容页", "showDetail": False},
-                        {"key": "3-3", "text": "添加结尾页", "showDetail": False},
-                    ],
-                },
-            },
-            {
-                "key": "4",
                 "title": "优化完善",
                 "description": "对PPT进行最后的优化和调整",
-                "detailType": "markdown",
+                "detailType": "text",
                 "meta": {
                     "summary": "检查并优化PPT的内容和呈现效果",
                     "substeps": [
-                        {"key": "4-1", "text": "内容校对", "showDetail": False},
-                        {"key": "4-2", "text": "版式调整", "showDetail": False},
+                        {"key": "3-1", "text": "内容校对", "showDetail": False},
+                        {"key": "3-2", "text": "版式调整", "showDetail": False},
                         {
-                            "key": "4-3",
+                            "key": "3-3",
                             "text": "最终导出",
                             "showDetail": True,
-                            "detailType": "markdown",
+                            "detailType": "list",
                             "detailPayload": {
-                                "type": "markdown",
-                                "data": export_suggestions,
+                                "format": "markdown",
+                                "content": export_suggestions,
                             },
                         },
                     ],
@@ -417,14 +389,14 @@ def _create_fallback_outline(topic: str, language: str) -> List[PPTOutlineItem]:
             },
         ]
     else:
-        topic_framework_en = f"### {topic} PPT Framework\n- Cover page\n- Table of contents\n- Content sections\n- Closing page"
+        topic_framework_en = f"### {topic} PPT Framework\n\n- Cover page\n- Table of contents\n- Content sections\n- Closing page"
 
         fallback_data = [
             {
                 "key": "0",
                 "title": "Requirements Analysis",
                 "description": f"Analyze requirements for {topic} PPT",
-                "detailType": "markdown",
+                "detailType": "text",
                 "meta": {
                     "summary": "Analyze user needs and define PPT creation goals",
                     "substeps": [
@@ -442,10 +414,10 @@ def _create_fallback_outline(topic: str, language: str) -> List[PPTOutlineItem]:
                             "key": "0-3",
                             "text": "Determine content framework",
                             "showDetail": True,
-                            "detailType": "markdown",
+                            "detailType": "list",
                             "detailPayload": {
-                                "type": "markdown",
-                                "data": topic_framework_en,
+                                "format": "markdown",
+                                "content": topic_framework_en,
                             },
                         },
                     ],
@@ -455,7 +427,7 @@ def _create_fallback_outline(topic: str, language: str) -> List[PPTOutlineItem]:
                 "key": "1",
                 "title": "Content Planning",
                 "description": "Plan specific content and structure of PPT",
-                "detailType": "markdown",
+                "detailType": "text",
                 "meta": {
                     "summary": "Develop detailed content planning and section arrangement",
                     "substeps": [
@@ -505,36 +477,3 @@ def _create_fallback_outline(topic: str, language: str) -> List[PPTOutlineItem]:
         outline_items.append(outline_item)
 
     return outline_items
-
-
-def _enforce_outline_quality(
-    items: List[PPTOutlineItem], topic: str, language: str
-) -> List[PPTOutlineItem]:
-    """后处理（legacy 模式）：
-    - 限制每个 item.meta.substeps ≤ 5
-    - showDetail 仅参照 thinking_steps 的规则：偶数位为 True，其余为 False
-    - 不改变 detailType/detailPayload 的取值（保持模型原样）
-    """
-
-    allowed_types = ["table", "image", "list", "code", "diagram"]
-    for item in items:
-        if item.meta and item.meta.substeps:
-            # 限制数量到 5
-            item.meta.substeps = item.meta.substeps[:5]
-            # 设置 showDetail：从 1 开始计数，偶数项 True
-            for i, s in enumerate(item.meta.substeps, start=1):
-                s.showDetail = (i % 2 == 0)
-                if s.showDetail:
-                    # detailType：若已有且合法则保留，否则从允许集合轮询选择
-                    dt_existing = getattr(s, "detailType", None)
-                    dt = dt_existing if isinstance(dt_existing, str) and dt_existing in allowed_types else allowed_types[(i - 1) % len(allowed_types)]
-                    s.detailType = dt
-                    # detailPayload：若缺失或类型不合法则填充最小可用
-                    payload = getattr(s, "detailPayload", None)
-                    ptype = payload.get("type") if isinstance(payload, dict) else None
-                    if not isinstance(payload, dict) or ptype not in allowed_types:
-                        heading = s.text or item.title
-                        base = item.meta.summary or item.description or item.title
-                        s.detailPayload = {"type": dt, "data": f"### {heading}\n{base}"}
-
-    return items

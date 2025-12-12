@@ -12,7 +12,6 @@ from app.services.file_upload_service import (
     get_file_contents_by_uuids,
 )
 from app.services.outline_state_engine import outline_state_engine
-from app.services.ppt_outline_service import generate_ppt_outline_with_format
 from app.utils.async_tasks import (
     create_enhanced_outline_task,
     get_enhanced_outline_status,
@@ -189,33 +188,110 @@ def _normalize_convergent_step_to_outline_item(
         substeps = substeps[:SUBSTEP_CAP]
 
     # 仅参照 thinking_steps 的规则设置 showDetail：偶数项 True，其它 False
-    allowed_types = ["table", "image", "list", "code", "diagram"]
+    allowed_types = ["text", "image", "list", "table"]
+    non_text_types = ["image", "list", "table"]  # 非 text 类型
+
+    def infer_type_from_content(content_text: str) -> str:
+        """根据内容启发式推断类型"""
+        # 检测表格标记（多行包含 | 字符）
+        lines = content_text.split("\n")
+        if sum(1 for line in lines if "|" in line) >= 2:
+            return "table"
+
+        # 检测列表（至少两行以 - 或 * 开头）
+        list_lines = [line.strip() for line in lines if line.strip().startswith(("- ", "* ", "•"))]
+        if len(list_lines) >= 2:
+            return "list"
+
+        # 默认文本类型
+        return "text"
+
+    # 统计已使用的 text 类型数量（用于强制多样性）
+    text_count = 0
+    detail_count = 0
+
     for idx, s in enumerate(substeps, start=1):
         s["showDetail"] = idx % 2 == 0
         if s["showDetail"]:
-            # detailType 优先使用现有且在允许列表内，否则按轮询分配
+            detail_count += 1
+
+            # 类型选择策略（带多样性约束）
             dt_existing = s.get("detailType")
-            dt = (
-                dt_existing
-                if isinstance(dt_existing, str) and dt_existing in allowed_types
-                else allowed_types[(idx - 1) % len(allowed_types)]
-            )
+
+            # 1) 如果已有合法类型，检查是否符合多样性规则
+            if isinstance(dt_existing, str) and dt_existing in allowed_types:
+                # 如果是 text 类型，检查是否已达上限
+                if dt_existing == "text" and text_count >= 1:
+                    # 已有 1 个 text，强制使用其他类型
+                    dt = non_text_types[(idx - 1) % len(non_text_types)]
+                else:
+                    dt = dt_existing
+                    if dt == "text":
+                        text_count += 1
+            else:
+                # 2) 尝试从内容推断
+                base_content = summary or description or title
+                inferred_type = infer_type_from_content(base_content)
+
+                # 3) 应用多样性规则
+                if inferred_type == "text" and text_count >= 1:
+                    # 已有 1 个 text，强制使用其他类型（轮询）
+                    dt = non_text_types[(detail_count - 1) % len(non_text_types)]
+                elif inferred_type in allowed_types:
+                    dt = inferred_type
+                    if dt == "text":
+                        text_count += 1
+                else:
+                    # 4) 轮询兜底（优先非 text 类型）
+                    if text_count >= 1:
+                        dt = non_text_types[(detail_count - 1) % len(non_text_types)]
+                    else:
+                        dt = allowed_types[(idx - 1) % len(allowed_types)]
+                        if dt == "text":
+                            text_count += 1
+
             s["detailType"] = dt
-            # detailPayload：若不存在或类型不在允许范围，按 dt 填充一个最小可用的数据包
-            payload = s.get("detailPayload") or {}
-            ptype = payload.get("type") if isinstance(payload, dict) else None
-            if not isinstance(payload, dict) or ptype not in allowed_types:
-                base = summary or description or title
-                heading = s.get("text") or title
-                data = f"### {heading}\n{base}"
-                s["detailPayload"] = {"type": dt, "data": data}
+
+            # detailPayload：构建新的 v2 结构并双写兼容字段
+            base = summary or description or title
+            heading = s.get("text") or title
+
+            # 根据类型生成适当的 Markdown 内容
+            if dt == "text":
+                markdown_content = f"### {heading}\n\n{base}"
+            elif dt == "list":
+                markdown_content = f"### {heading}\n\n- {base}\n- 详细说明\n- 补充要点"
+            elif dt == "table":
+                markdown_content = (
+                    f"### {heading}\n\n| 项目 | 描述 |\n|---|---|\n"
+                    f"| 主要内容 | {base} |\n| 关键要点 | 详细说明 |"
+                )
+            elif dt == "image":
+                # 图片类型：需要有效 URL，这里暂时使用占位符
+                # 实际应调用 image_asset_service.resolve() 获取真实图片
+                markdown_content = f"### {heading}\n\n![{heading}](placeholder.jpg)\n\n> {base}"
+            else:
+                markdown_content = f"### {heading}\n\n{base}"
+
+            # 构建 v2 payload 结构
+            s["detailPayload"] = {
+                "format": "markdown",
+                "content": markdown_content,
+            }
+
+            # 如果是图片类型，添加额外字段（占位符）
+            if dt == "image":
+                s["detailPayload"]["imageUrl"] = "placeholder.jpg"  # TODO: 实际应用时调用 image_asset_service
+                s["detailPayload"]["alt"] = heading
+                s["detailPayload"]["caption"] = base
 
     return {
         "key": str(step),  # 0 基
         "title": title,
         "description": description,
-        "detailType": "markdown",
+        "detailType": "text",  # 顶层类型统一为 text
         "meta": {"summary": summary, "substeps": substeps},
+        "schemaVersion": 2,  # v2 数据契约版本标记
     }
 
 
@@ -227,13 +303,7 @@ async def generate_ppt_outline_endpoint(
         default=None,
         description="已上传文件的UUID列表，用逗号分隔，例如: uuid1,uuid2,uuid3",
     ),
-    session_id: Optional[str] = Form(
-        default=None, description="自收敛模式：会话ID，首次请求不传"
-    ),
-    mode: Optional[str] = Form(
-        default="legacy",
-        description="运行模式：legacy(默认，单次生成) / convergent(自收敛轮询)",
-    ),
+    session_id: Optional[str] = Form(default=None, description="会话ID，首次请求不传"),
 ) -> PPTOutlineResponse:
     start_time = time.time()
     try:
@@ -264,30 +334,44 @@ async def generate_ppt_outline_endpoint(
                 reference_content = ""
                 reference_sources = []
 
-        # 自收敛模式：通过状态引擎推动一步并返回
-        if (mode or "legacy").lower() == "convergent":
-            step_result, is_completed, new_session_id = (
-                await outline_state_engine.process_request(
-                    topic=topic.strip(),
-                    session_id=session_id,
-                    language=language or "zh",
-                    reference_content=reference_content,
-                    reference_sources=reference_sources,
-                )
+        # 统一使用自收敛模式：通过状态引擎推动一步并返回
+        step_result, is_completed, new_session_id = (
+            await outline_state_engine.process_request(
+                topic=topic.strip(),
+                session_id=session_id,
+                language=language or "zh",
+                reference_content=reference_content,
+                reference_sources=reference_sources,
             )
+        )
 
-            execution_time = time.time() - start_time
-            # 收敛时自动触发增强版生成
-            enhanced_uuid = None
-            enhanced_status = EnhancedOutlineStatus.PENDING
-            if is_completed:
-                try:
-                    enhanced_uuid = (
-                        await enhanced_outline_storage.create_outline_record(
-                            topic=topic.strip(),
-                            language=language or "zh",
-                            reference_sources=reference_sources,
-                        )
+        execution_time = time.time() - start_time
+        # 第一轮就触发增强版生成（当没有 session_id 或首次请求时）
+        enhanced_uuid = None
+        enhanced_status = EnhancedOutlineStatus.PENDING
+
+        # 判断是否为第一轮：没有提供 session_id，或者是新创建的 session
+        is_first_round = session_id is None or (
+            session_id and not any(s in session_id for s in ["sess_"])
+        )
+
+        if is_first_round or is_completed:
+            try:
+                # 检查是否已经创建过增强版记录（避免重复创建）
+                should_create = True
+                if is_first_round:
+                    # 第一轮：直接创建
+                    should_create = True
+                elif is_completed:
+                    # 收敛时：只有在第一轮没创建的情况下才创建
+                    # 这里简化处理，实际可以通过检查是否已有记录来判断
+                    should_create = True
+
+                if should_create:
+                    enhanced_uuid = await enhanced_outline_storage.create_outline_record(
+                        topic=topic.strip(),
+                        language=language or "zh",
+                        reference_sources=reference_sources,
                     )
                     # 这里 original_outline 简化为空列表；增强版生成逻辑主要依赖 topic/language/reference_content
                     await create_enhanced_outline_task(
@@ -299,64 +383,29 @@ async def generate_ppt_outline_endpoint(
                         enhanced_uuid=enhanced_uuid,
                     )
                     enhanced_status = EnhancedOutlineStatus.PROCESSING
-                except Exception as e:
-                    logger.error(
-                        f"Failed to start enhanced outline (convergent): {str(e)}"
-                    )
-                    enhanced_status = EnhancedOutlineStatus.FAILED
+                    logger.info(f"增强版大纲已在第一轮触发: {enhanced_uuid}")
+            except Exception as e:
+                logger.error(f"Failed to start enhanced outline: {str(e)}")
+                enhanced_status = EnhancedOutlineStatus.FAILED
 
-            # 规范化为单个 PPTOutlineItem 字典返回
-            normalized_item = _normalize_convergent_step_to_outline_item(
-                step_result,
-                topic=topic.strip(),
-                language=language or "zh",
-            )
-
-            return PPTOutlineResponse(
-                status="success",
-                outline=[normalized_item],
-                session_id=new_session_id,
-                is_completed=is_completed,
-                enhanced_outline_status=enhanced_status,
-                enhanced_outline_uuid=enhanced_uuid,
-                topic=topic.strip(),
-                language=language or "zh",
-                execution_time=execution_time,
-                reference_sources=reference_sources,
-            )
-
-        # 兼容旧模式：一次性生成 + 异步增强版
-        result = await generate_ppt_outline_with_format(
+        # 规范化为单个 PPTOutlineItem 字典返回
+        normalized_item = _normalize_convergent_step_to_outline_item(
+            step_result,
             topic=topic.strip(),
             language=language or "zh",
-            reference_content=reference_content,
-            reference_sources=reference_sources,
-            generate_enhanced=True,
         )
 
-        execution_time = time.time() - start_time
-
-        outline_dicts: List[Dict[str, Any]] = []
-        if result["outline"]:
-            for item in result["outline"]:
-                if hasattr(item, "model_dump"):
-                    outline_dicts.append(item.model_dump())
-                elif hasattr(item, "dict"):
-                    outline_dicts.append(item.dict())
-                else:
-                    outline_dicts.append(item)
-
         return PPTOutlineResponse(
-            status=result["status"],
-            outline=outline_dicts,
-            session_id=None,
-            is_completed=None,
-            enhanced_outline_status=result["enhanced_outline_status"],
-            enhanced_outline_uuid=result["enhanced_outline_uuid"],
-            topic=result["topic"],
-            language=result["language"],
+            status="success",
+            outline=[normalized_item],
+            session_id=new_session_id,
+            is_completed=is_completed,
+            enhanced_outline_status=enhanced_status,
+            enhanced_outline_uuid=enhanced_uuid,
+            topic=topic.strip(),
+            language=language or "zh",
             execution_time=execution_time,
-            reference_sources=result["reference_sources"],
+            reference_sources=reference_sources,
         )
     except HTTPException:
         raise

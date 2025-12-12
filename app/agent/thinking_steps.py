@@ -46,7 +46,7 @@ class ThinkingStepsAgent(BaseAgent):
         "总结与交付",
     ]
 
-    DETAIL_CYCLE: ClassVar[List[str]] = ["table", "image", "list", "code", "diagram"]
+    DETAIL_CYCLE: ClassVar[List[str]] = ["text", "image", "list", "table"]
 
     THEME_DESCRIPTIONS: ClassVar[dict] = {
         "理解与界定": "深入分析项目需求，明确目标边界、用户群体和核心业务目标，为后续工作提供清晰的方向指引",

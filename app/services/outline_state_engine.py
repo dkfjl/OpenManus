@@ -248,8 +248,33 @@ class OutlineStateEngine:
 内容类型：{content_type}
 输出语言：{lang_label}
 
-要求：
-1) 内容具体可执行，避免空泛描述；2) 与前序保持一致；3) 推荐输出标准JSON对象，字段清晰（如 chapters/items/points 等）；4) 目标质量≥{self.quality_threshold}
+核心要求：
+1) 内容具体可执行，避免空泛描述
+2) 与前序保持一致
+3) 推荐输出标准JSON对象，字段清晰（如 chapters/items/points 等）
+4) 目标质量≥{self.quality_threshold}
+
+**重要：内容多样性约束**
+5) 必须包含至少 3-5 个子项（items/points/chapters）
+6) 其中至少 2 个子项需要标记为详细展示（showDetail: true）
+7) 详细展示的子项必须指定 detailType，类型规则如下：
+   - 允许的类型：text（文本）、list（列表）、table（表格）、image（图片）
+   - **强制规则**：最多只能有 1 个 text 类型，其余必须使用 list/table/image
+   - 示例组合1：[list, table]
+   - 示例组合2：[text, list]
+   - 示例组合3：[list, image]
+   - 错误组合：[text, text] ❌
+
+输出格式示例：
+{{
+  "summary": "本步骤的概要说明",
+  "items": [
+    {{"title": "子项1", "showDetail": false}},
+    {{"title": "子项2", "showDetail": true, "detailType": "list", "content": "- 要点1\\n- 要点2\\n- 要点3"}},
+    {{"title": "子项3", "showDetail": false}},
+    {{"title": "子项4", "showDetail": true, "detailType": "table", "content": "| 列1 | 列2 |\\n|---|---|\\n| 数据1 | 数据2 |"}}
+  ]
+}}
 """
 
         if step > 0 and session.step_results:
