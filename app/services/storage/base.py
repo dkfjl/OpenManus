@@ -40,13 +40,18 @@ class ObjectStorageService(ABC):
     async def generate_presigned_url(
         self,
         storage_key: str,
-        expire_seconds: Optional[int] = None
+        expire_seconds: Optional[int] = None,
+        response_params: Optional[Dict[str, Any]] = None,
     ) -> str:
         """生成预签名URL
 
         Args:
             storage_key: 对象存储中的key
             expire_seconds: 过期时间（秒），如果为None则使用默认值
+            response_params: 额外的响应参数（如内容处置/类型），
+                统一使用键：
+                - content_disposition: str (e.g., 'inline; filename="a.docx"')
+                - content_type: str (e.g., 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
 
         Returns:
             预签名的URL

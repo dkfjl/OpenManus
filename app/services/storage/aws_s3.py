@@ -80,19 +80,28 @@ class AWSS3Service(ObjectStorageService):
     async def generate_presigned_url(
         self,
         storage_key: str,
-        expire_seconds: Optional[int] = None
+        expire_seconds: Optional[int] = None,
+        response_params: Optional[Dict[str, Any]] = None,
     ) -> str:
         """生成预签名URL"""
         try:
             expire_time = expire_seconds or self.presign_expire_seconds
 
             def _generate_url():
+                params = {
+                    'Bucket': self.bucket,
+                    'Key': storage_key
+                }
+                if response_params:
+                    cd = response_params.get('content_disposition')
+                    ct = response_params.get('content_type')
+                    if cd:
+                        params['ResponseContentDisposition'] = cd
+                    if ct:
+                        params['ResponseContentType'] = ct
                 url = self.s3_client.generate_presigned_url(
                     'get_object',
-                    Params={
-                        'Bucket': self.bucket,
-                        'Key': storage_key
-                    },
+                    Params=params,
                     ExpiresIn=expire_time
                 )
                 return url

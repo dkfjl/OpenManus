@@ -72,7 +72,8 @@ class AliyunOSSService(ObjectStorageService):
     async def generate_presigned_url(
         self,
         storage_key: str,
-        expire_seconds: Optional[int] = None
+        expire_seconds: Optional[int] = None,
+        response_params: Optional[Dict[str, Any]] = None,
     ) -> str:
         """生成预签名URL"""
         try:
@@ -80,11 +81,21 @@ class AliyunOSSService(ObjectStorageService):
 
             def _generate_url():
                 # 生成下载签名URL
+                params = None
+                if response_params:
+                    params = {}
+                    cd = response_params.get('content_disposition')
+                    ct = response_params.get('content_type')
+                    if cd:
+                        params['response-content-disposition'] = cd
+                    if ct:
+                        params['response-content-type'] = ct
                 url = self.bucket_client.sign_url(
                     'GET',
                     storage_key,
                     expire_time,
-                    slash_safe=True
+                    slash_safe=True,
+                    params=params
                 )
                 return url
 
