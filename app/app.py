@@ -92,13 +92,7 @@ def create_app() -> FastAPI:
     except Exception as e:  # pragma: no cover
         logger.warning(f"Optional chat router not loaded: {e}")
 
-    # Report file storage API
-    try:
-        from app.api.routes.report_files import router as report_files_router  # type: ignore
-
-        app.include_router(report_files_router)
-    except Exception as e:  # pragma: no cover
-        logger.warning(f"Optional report_files router not loaded: {e}")
+    # Report file storage API removed; /api/docx/generate now returns presigned URLs directly
 
     return app
 

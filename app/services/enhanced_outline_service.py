@@ -143,6 +143,10 @@ def _parse_enhanced_response(
         if not enhanced_outline:
             raise ValueError("No valid slide items found in response")
 
+        # 对中文内容进行最小字数强化（内容页 items[*].text ≥ 50字）
+        if (language or "zh").lower().startswith("zh"):
+            _enforce_min_chinese_text_length(enhanced_outline, topic, min_chars=50)
+
         # 验证整体大纲结构
         if not validate_enhanced_outline(enhanced_outline):
             logger.warning("Enhanced outline validation failed, using fallback")
@@ -153,12 +157,59 @@ def _parse_enhanced_response(
     except json.JSONDecodeError as e:
         logger.error(f"JSON parsing failed for enhanced outline: {str(e)}")
         # 返回fallback大纲
-        return create_fallback_enhanced_outline(topic, language)
+        outline = create_fallback_enhanced_outline(topic, language)
+        if (language or "zh").lower().startswith("zh"):
+            _enforce_min_chinese_text_length(outline, topic, min_chars=50)
+        return outline
 
     except Exception as e:
         logger.error(f"Enhanced outline parsing failed: {str(e)}")
         # 返回fallback大纲
-        return create_fallback_enhanced_outline(topic, language)
+        outline = create_fallback_enhanced_outline(topic, language)
+        if (language or "zh").lower().startswith("zh"):
+            _enforce_min_chinese_text_length(outline, topic, min_chars=50)
+        return outline
+
+
+def _enforce_min_chinese_text_length(
+    outline: List[EnhancedSlideItem], topic: str, *, min_chars: int = 50
+) -> None:
+    """确保中文内容页 items[*].text 的字数不少于 min_chars。
+
+    仅在 type == "content" 且 data.items 为列表时生效，按需对过短文本做温和扩展。
+    """
+
+    def enrich(text: Optional[str], title: str) -> str:
+        base = (text or "").strip()
+        # 统计不含空白的字符数
+        count = len("".join(base.split()))
+        if count >= min_chars:
+            return base
+
+        addon = (
+            f"。围绕“{title}”，结合“{topic}”，补充背景、目标、关键方法、实施步骤与注意事项，"
+            f"并以简要案例说明做法与结果，明确评估指标与预期效果，强调可执行与落地细节。"
+        )
+        # 迭代拼接直到满足最小长度
+        while len("".join(base.split())) < min_chars:
+            base = (base + addon).strip("。") + "。"
+        return base
+
+    try:
+        for slide in outline:
+            if getattr(slide, "type", None) != "content":
+                continue
+            items = slide.data.get("items") if isinstance(slide.data, dict) else None
+            if not isinstance(items, list):
+                continue
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                title = str(it.get("title") or it.get("point") or "要点").strip()
+                it["text"] = enrich(it.get("text"), title)
+    except Exception as e:
+        # 不因扩展失败而中断流程，仅记录
+        logger.warning(f"Chinese text length enforcement skipped due to: {e}")
 
 
 async def process_enhanced_outline_async(
