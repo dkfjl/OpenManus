@@ -2,7 +2,7 @@ import time
 from typing import Optional
 from pathlib import Path
 
-from fastapi import APIRouter, Form, HTTPException, Depends
+from fastapi import APIRouter, Form, HTTPException, Depends, Request
 
 from app.schemas.report import ReportResult
 from app.logger import logger
@@ -16,6 +16,7 @@ from app.services.file_upload_service import (
     get_file_contents_by_uuids,
 )
 from app.services.report_generation_service import generate_report_from_steps
+from app.services.knowledge_service import KnowledgeService
 
 # 导入对象存储相关
 from app.services.report_file_service import ReportFileService
@@ -34,6 +35,7 @@ async def generate_report_endpoint(
     ),
     user_id: str = Form(default="default_user", description="用户ID"),  # TODO: 从认证中获取
     report_file_service: Optional[ReportFileService] = Depends(get_report_file_service),
+    request: Request = None,
 ) -> ReportResult:
     log_session = start_execution_log(
         flow_type="report_generation",
@@ -81,6 +83,50 @@ async def generate_report_endpoint(
         else:
             log_execution_event("document_upload", "No file references provided", {})
 
+        # 先进行知识库检索，将结果作为“摘要性质”的上下文并入参考内容
+        kb_context = ""
+        try:
+            t_kb = time.perf_counter()
+            ks = KnowledgeService()
+            kb_items, kb_total, _ = await ks.retrieve(
+                query=topic.strip(),
+                # 其余参数使用配置默认值
+                return_expansion=False,
+            )
+            if kb_total > 0:
+                # 拼接前若干片段，限制体量，避免上下文过长
+                max_chars = 3000
+                acc = []
+                length = 0
+                for rec in kb_items:
+                    text = (rec.content or "").strip()
+                    if not text:
+                        continue
+                    if length and length + len(text) + 2 > max_chars:
+                        break
+                    acc.append(text)
+                    length += len(text) + 2
+                    # 记录来源（尽量取到可读标题/URL/ID）
+                    md = rec.metadata or {}
+                    src = md.get("title") or md.get("url") or md.get("document_id") or md.get("doc_id")
+                    if src:
+                        reference_sources.append(str(src))
+                kb_context = "\n\n".join(acc)[:max_chars]
+            log_execution_event(
+                "kb_retrieve",
+                "KB retrieval for report context finished",
+                {"kb_total": kb_total, "kb_ctx_len": len(kb_context or "")},
+            )
+        except Exception as e:
+            # 检索失败不影响主流程
+            log_execution_event("kb_retrieve", "KB retrieval failed, continue without KB", {"error": str(e)})
+
+        # 合并知识库上下文与上传文件解析内容
+        if kb_context and parsed_content:
+            parsed_content = kb_context + "\n\n" + parsed_content
+        elif kb_context:
+            parsed_content = kb_context
+
         t_d0 = time.perf_counter()
         log_execution_event(
             "report_generation",
@@ -92,12 +138,34 @@ async def generate_report_endpoint(
                 "reference_sources": len(reference_sources or []),
             },
         )
+        # 从合并后的参考内容中，尽量拆分出“上传文件摘录”和“知识检索摘录”
+        file_excerpt = None
+        kb_excerpt = None
+        if parsed_content and kb_context:
+            # parsed_content 此时可能包含 kb_context + 上传文件内容，做一次简单拆分
+            # 这里以 kb_context 的文本作为分隔标记（若失败则降级为整体摘要）
+            try:
+                if parsed_content.startswith(kb_context):
+                    kb_excerpt = kb_context
+                    file_excerpt = parsed_content[len(kb_context):].strip() or None
+                else:
+                    # 找不到稳定分隔，则不做区分
+                    kb_excerpt = kb_context
+            except Exception:
+                kb_excerpt = kb_context
+        elif kb_context:
+            kb_excerpt = kb_context
+        else:
+            file_excerpt = parsed_content
+
         result = await generate_report_from_steps(
             topic=topic.strip(),
             language=language,
             fmt="docx",
             reference_content=parsed_content,
             reference_sources=reference_sources,
+            file_reference_excerpt=file_excerpt,
+            kb_reference_excerpt=kb_excerpt,
         )
         log_execution_event(
             "report_generation",
@@ -118,7 +186,7 @@ async def generate_report_endpoint(
             },
         )
 
-        # 尝试上传到对象存储
+        # 尝试上传到对象存储，并直接返回可访问的预签名直链
         file_uuid = None
         preview_url = None
         download_url = None
@@ -136,24 +204,51 @@ async def generate_report_endpoint(
                         file_path=Path(filepath),
                         original_filename=Path(filepath).name,
                         user_id=user_id,
-                        expire_days=30
+                        expire_days=30,
                     )
 
-                    # 生成预览和下载URL路径（相对路径）
-                    preview_url = f"/api/reports/{file_uuid}/preview"
-                    download_url = f"/api/reports/{file_uuid}/download"
-                    storage_enabled = True
+                    # 直接生成预签名直链（用于预览/下载）
+                    try:
+                        access_ip = (
+                            request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+                            or (request.client.host if request and request.client else None)
+                        ) if request else None
+                        user_agent = request.headers.get("User-Agent") if request else None
+
+                        preview_url = await report_file_service.get_preview_url(
+                            file_uuid=file_uuid,
+                            user_id=user_id,
+                            access_ip=access_ip,
+                            user_agent=user_agent,
+                        )
+                        download_url = await report_file_service.get_download_url(
+                            file_uuid=file_uuid,
+                            user_id=user_id,
+                            access_ip=access_ip,
+                            user_agent=user_agent,
+                        )
+                        storage_enabled = True
+                    except Exception as gen_url_err:
+                        # URL 生成失败不阻塞流程
+                        log_execution_event(
+                            "storage_upload",
+                            "Presigned URL generation failed",
+                            {"error": str(gen_url_err)},
+                        )
 
                     log_execution_event(
                         "storage_upload",
                         "Report uploaded to object storage successfully",
                         {
                             "file_uuid": file_uuid,
-                            "preview_url": preview_url,
+                            "has_preview_url": bool(preview_url),
+                            "has_download_url": bool(download_url),
                             "upload_duration_sec": round(time.perf_counter() - t_upload, 3),
                         },
                     )
-                    logger.info(f"Report uploaded to storage: uuid={file_uuid}, preview_url={preview_url}")
+                    logger.info(
+                        f"Report uploaded to storage: uuid={file_uuid}, has_preview={bool(preview_url)}, has_download={bool(download_url)}"
+                    )
                 else:
                     logger.warning(f"Report file not found at {filepath}, skipping storage upload")
 

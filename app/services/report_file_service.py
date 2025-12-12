@@ -160,10 +160,14 @@ class ReportFileService:
                 await self.db.flush()
             raise ValueError("File has expired")
 
-        # 生成临时URL
+        # 生成临时URL（预览：inline）
         presigned_url = await self.storage_service.generate_presigned_url(
             file_info.storage_key,
-            expire_seconds=self.storage_service.presign_expire_seconds
+            expire_seconds=self.storage_service.presign_expire_seconds,
+            response_params={
+                'content_disposition': f'inline; filename="{file_info.original_filename}"',
+                'content_type': file_info.content_type,
+            }
         )
 
         # 记录访问日志
@@ -180,8 +184,8 @@ class ReportFileService:
 
             async with self.db.begin():
                 self.db.add(access_log)
-                # 更新下载次数
-                file_info.download_count += 1
+                # 可选：预览不计入下载次数（如需单独字段，需改表结构）
+                # 这里不增加 download_count
                 await self.db.flush()
 
             logger.info(f"Preview URL generated: uuid={file_uuid}, user={user_id}")
@@ -225,10 +229,14 @@ class ReportFileService:
                 await self.db.flush()
             raise ValueError("File has expired")
 
-        # 生成临时URL
+        # 生成临时URL（下载：attachment）
         presigned_url = await self.storage_service.generate_presigned_url(
             file_info.storage_key,
-            expire_seconds=self.storage_service.presign_expire_seconds
+            expire_seconds=self.storage_service.presign_expire_seconds,
+            response_params={
+                'content_disposition': f'attachment; filename="{file_info.original_filename}"',
+                'content_type': file_info.content_type,
+            }
         )
 
         # 记录访问日志

@@ -69,6 +69,8 @@ async def generate_report_from_steps(
     filepath: Optional[str] = None,
     reference_content: Optional[str] = None,
     reference_sources: Optional[List[str]] = None,
+    file_reference_excerpt: Optional[str] = None,
+    kb_reference_excerpt: Optional[str] = None,
 ) -> dict:
     if fmt.lower() != "docx":
         raise ValueError("当前仅支持 docx 格式")
@@ -229,17 +231,39 @@ async def generate_report_from_steps(
             append=True,
         )
 
-    # Step 5: Add overview and references if applicable
+    # Step 5: Add overview and appendices (file excerpts and KB excerpts)
     overview_section = None
     if reference_content and reference_content.strip():
         overview_section = {
             "heading": "参考内容概述",
             "level": 1,
-            "content": f"基于上传的参考资料，以下是对关键信息的概述：\n{reference_content[:2000]}"
+            "content": f"以下为用于生成报告的参考摘要片段（截断展示）：\n{reference_content[:2000]}"
         }
         await word_tool.execute(
             filepath=abs_path,
             sections=[overview_section],
+            append=True,
+        )
+
+    append_sections: List[dict] = []
+    # 附录A：上传文件摘录
+    if file_reference_excerpt and file_reference_excerpt.strip():
+        append_sections.append({
+            "heading": "附录A 上传文件摘录",
+            "level": 1,
+            "content": file_reference_excerpt[:8000],
+        })
+    # 附录B：知识检索摘录
+    if kb_reference_excerpt and kb_reference_excerpt.strip():
+        append_sections.append({
+            "heading": "附录B 知识检索摘录",
+            "level": 1,
+            "content": kb_reference_excerpt[:8000],
+        })
+    if append_sections:
+        await word_tool.execute(
+            filepath=abs_path,
+            sections=append_sections,
             append=True,
         )
 
