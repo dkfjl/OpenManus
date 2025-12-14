@@ -1,0 +1,24 @@
+# Global LLM configuration
+[llm] # XINFERENCE (OpenAI-compatible)
+api_type = 'xinference'
+model = "qwen2.5-7b-instruct"                         # Use your deployed model name or UID in Xinference
+base_url = "http://localhost:9997/v1"                 # Xinference OpenAI-compatible endpoint
+api_key = "xinference"                                # Placeholder; Xinference often doesn't enforce it
+max_tokens = 4096                                      # Max completion tokens
+temperature = 0.0                                      # Sampling temperature
+
+
+# Optional vision model profile (if you deployed a multimodal model)
+[llm.vision]
+api_type = 'xinference'
+model = "qwen2-vl-7b-instruct"                        # Example multimodal model
+base_url = "http://localhost:9997/v1"
+api_key = "xinference"
+max_tokens = 4096
+temperature = 0.0
+
+# Notes:
+# - Start Xinference and deploy models first. Ensure the OpenAI-compatible API is enabled.
+# - The "model" can be the model UID returned by Xinference or the served name.
+# - Because Xinference speaks the OpenAI Chat Completions API, the code path uses the
+#   generic OpenAI client with the provided base_url.
