@@ -11,7 +11,6 @@ from app.services.file_upload_service import (
     file_upload_service,
     get_file_contents_by_uuids,
 )
-from app.services.outline_state_engine import outline_state_engine
 from app.utils.async_tasks import (
     create_enhanced_outline_task,
     get_enhanced_outline_status,
@@ -334,73 +333,26 @@ async def generate_ppt_outline_endpoint(
                 reference_content = ""
                 reference_sources = []
 
-        # 统一使用自收敛模式：通过状态引擎推动一步并返回
-        step_result, is_completed, new_session_id = (
-            await outline_state_engine.process_request(
-                topic=topic.strip(),
-                session_id=session_id,
-                language=language or "zh",
-                reference_content=reference_content,
-                reference_sources=reference_sources,
-            )
+        # 精简逻辑：直接触发增强版大纲任务
+        enhanced_uuid = await enhanced_outline_storage.create_outline_record(
+            topic=topic.strip(), language=language or "zh", reference_sources=reference_sources
+        )
+        await create_enhanced_outline_task(
+            original_outline=[],
+            topic=topic.strip(),
+            language=language or "zh",
+            reference_content=reference_content,
+            reference_sources=reference_sources,
+            enhanced_uuid=enhanced_uuid,
         )
 
         execution_time = time.time() - start_time
-        # 第一轮就触发增强版生成（当没有 session_id 或首次请求时）
-        enhanced_uuid = None
-        enhanced_status = EnhancedOutlineStatus.PENDING
-
-        # 判断是否为第一轮：没有提供 session_id，或者是新创建的 session
-        is_first_round = session_id is None or (
-            session_id and not any(s in session_id for s in ["sess_"])
-        )
-
-        if is_first_round or is_completed:
-            try:
-                # 检查是否已经创建过增强版记录（避免重复创建）
-                should_create = True
-                if is_first_round:
-                    # 第一轮：直接创建
-                    should_create = True
-                elif is_completed:
-                    # 收敛时：只有在第一轮没创建的情况下才创建
-                    # 这里简化处理，实际可以通过检查是否已有记录来判断
-                    should_create = True
-
-                if should_create:
-                    enhanced_uuid = await enhanced_outline_storage.create_outline_record(
-                        topic=topic.strip(),
-                        language=language or "zh",
-                        reference_sources=reference_sources,
-                    )
-                    # 这里 original_outline 简化为空列表；增强版生成逻辑主要依赖 topic/language/reference_content
-                    await create_enhanced_outline_task(
-                        original_outline=[],
-                        topic=topic.strip(),
-                        language=language or "zh",
-                        reference_content=reference_content,
-                        reference_sources=reference_sources,
-                        enhanced_uuid=enhanced_uuid,
-                    )
-                    enhanced_status = EnhancedOutlineStatus.PROCESSING
-                    logger.info(f"增强版大纲已在第一轮触发: {enhanced_uuid}")
-            except Exception as e:
-                logger.error(f"Failed to start enhanced outline: {str(e)}")
-                enhanced_status = EnhancedOutlineStatus.FAILED
-
-        # 规范化为单个 PPTOutlineItem 字典返回
-        normalized_item = _normalize_convergent_step_to_outline_item(
-            step_result,
-            topic=topic.strip(),
-            language=language or "zh",
-        )
-
         return PPTOutlineResponse(
             status="success",
-            outline=[normalized_item],
-            session_id=new_session_id,
-            is_completed=is_completed,
-            enhanced_outline_status=enhanced_status,
+            outline=[],  # 不再返回思考过程大纲
+            session_id=None,
+            is_completed=None,
+            enhanced_outline_status=EnhancedOutlineStatus.PROCESSING,
             enhanced_outline_uuid=enhanced_uuid,
             topic=topic.strip(),
             language=language or "zh",

@@ -74,3 +74,10 @@ class ThinkchainGenerateResponse(BaseModel):
     language: str
     execution_time: float
     reference_sources: List[str] = Field(default_factory=list)
+    # Optional fields populated when the session completes
+    analysis_ready: Optional[bool] = Field(default=None, description="综合分析是否已准备")
+    analysis_endpoint: Optional[str] = Field(default=None, description="获取综合分析的API地址")
+    post_actions: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="后置动作提示或结果（日志摘要UUID、报告/PPT提示参数等）",
+    )

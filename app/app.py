@@ -97,6 +97,37 @@ def create_app() -> FastAPI:
         from app.api.routes.thinkchain import router as thinkchain_router  # type: ignore
 
         app.include_router(thinkchain_router)
+        # ThinkChain analysis router
+        try:
+            from app.api.routes.thinkchain_analysis import (
+                router as thinkchain_analysis_router,
+            )  # type: ignore
+
+            app.include_router(thinkchain_analysis_router)
+            # Report result query router
+            try:
+                from app.api.routes.thinkchain_report_result import (
+                    router as thinkchain_report_router,
+                )  # type: ignore
+
+                app.include_router(thinkchain_report_router)
+                # PPT result query router
+                try:
+                    from app.api.routes.thinkchain_ppt_result import (
+                        router as thinkchain_ppt_router,
+                    )  # type: ignore
+
+                    app.include_router(thinkchain_ppt_router)
+                except Exception as e:  # pragma: no cover
+                    logger.warning(
+                        f"Optional thinkchain ppt-result router not loaded: {e}"
+                    )
+            except Exception as e:  # pragma: no cover
+                logger.warning(
+                    f"Optional thinkchain report-result router not loaded: {e}"
+                )
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"Optional thinkchain analysis router not loaded: {e}")
     except Exception as e:  # pragma: no cover
         logger.warning(f"Optional thinkchain router not loaded: {e}")
 

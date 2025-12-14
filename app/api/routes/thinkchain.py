@@ -14,12 +14,22 @@ from app.services.file_upload_service import (
 from app.services.thinkchain_normalizer import normalize_step_result
 from app.services.thinkchain_registry import thinkchain_registry
 from app.services.thinkchain_state_engine import thinkchain_state_engine
+from app.services.thinkchain_log_service import thinkchain_log_service
+from app.services.thinkchain_analysis_service import thinkchain_analysis_service
+from app.services.thinkchain_post_action_service import thinkchain_post_action_service
+from app.schemas.thinkchain_analysis import (
+    ThinkchainAnalysisRequest,
+    ThinkchainAnalysisResponse,
+)
 
 router = APIRouter()
 
 
 def _validate_task_type(task_type: Optional[str]) -> str:
     t = (task_type or "normal").lower()
+    # accept 'pptx' as alias of 'ppt'
+    if t == "pptx":
+        t = "ppt"
     if t not in {"normal", "report", "ppt"}:
         raise HTTPException(
             status_code=400, detail="非法 task_type，允许: normal/report/ppt"
@@ -179,7 +189,45 @@ async def thinkchain_generate_endpoint(
             step_result, topic=resolved_topic or "", language=resolved_language
         )
 
-        return {
+        # Logging to workspace/thinkchain_logs as JSONL
+        try:
+            # Start record on first round (no incoming session_id)
+            if session_id is None:
+                thinkchain_log_service.log_session_start(
+                    chain_id=chain_id,
+                    session_id=new_session_id,
+                    metadata={
+                        "topic": resolved_topic or "",
+                        "task_type": ttype,
+                        "language": resolved_language,
+                        "steps_count": len(steps),
+                        "reference_sources": reference_sources,
+                        "reference_file_uuids": rec.reference_file_uuids,
+                    },
+                )
+            # Append step record
+            thinkchain_log_service.log_step(
+                chain_id=chain_id,
+                session_id=new_session_id,
+                step_result=step_result,
+                normalized=normalized_item,
+            )
+            # End record when completed
+            if is_completed:
+                thinkchain_log_service.log_session_end(
+                    chain_id=chain_id,
+                    session_id=new_session_id,
+                    status="completed",
+                    details={
+                        "topic": resolved_topic or "",
+                        "final_normalized": normalized_item,
+                    },
+                )
+        except Exception:
+            # Logging failures must not break API flow
+            pass
+
+        resp = {
             "status": "success",
             "outline": [normalized_item],
             "session_id": new_session_id,
@@ -189,8 +237,91 @@ async def thinkchain_generate_endpoint(
             "execution_time": _time.time() - started,
             "reference_sources": reference_sources,
         }
+
+        # Post-completion tasks: analysis + optional report/ppt generation
+        if is_completed:
+            try:
+                # fire-and-forget background analysis (not to block response)
+                import asyncio
+
+                async def _post_tasks():
+                    # generate analysis and log an event
+                    analysis = await thinkchain_analysis_service.generate_analysis(
+                        chain_id=chain_id, session_id=new_session_id, language=resolved_language
+                    )
+                    try:
+                        thinkchain_log_service.log_event(
+                            chain_id=chain_id,
+                            session_id=new_session_id,
+                            event="analysis_generated",
+                            data={"analysis_path": analysis.get("log_path", "")},
+                        )
+                    except Exception:
+                        pass
+                    # run optional post actions (report/ppt)
+                    try:
+                        await thinkchain_post_action_service.run_post_actions(
+                            task_type=ttype,
+                            chain_id=chain_id,
+                            session_id=new_session_id,
+                            topic=resolved_topic or "",
+                            language=resolved_language,
+                            reference_file_uuids=rec.reference_file_uuids,
+                        )
+                    except Exception:
+                        pass
+
+                asyncio.create_task(_post_tasks())
+
+                # Allow clients to pull analysis via the new endpoint
+                resp["analysis_ready"] = True
+                resp["analysis_endpoint"] = f"/api/thinkchain/analysis?chain_id={chain_id}"
+            except Exception:
+                resp["analysis_ready"] = False
+
+            # Expose prepared digest UUID for clients, even as background tasks run
+            try:
+                digest_uuid = thinkchain_analysis_service.create_digest_upload_file(
+                    chain_id=chain_id, session_id=new_session_id
+                )
+                resp["post_actions"] = {
+                    "log_digest_uuid": digest_uuid,
+                    "hints": {
+                        "report": {
+                            "endpoint": "/api/docx/generate",
+                            "params": {
+                                "topic": resolved_topic or "",
+                                "language": resolved_language,
+                                "file_uuids": ",".join([digest_uuid] + (rec.reference_file_uuids or [])),
+                            },
+                        },
+                        "ppt": {
+                            "endpoint": "/api/ppt-outline/generate",
+                            "params": {
+                                "topic": resolved_topic or "",
+                                "language": resolved_language,
+                                "file_uuids": ",".join([digest_uuid] + (rec.reference_file_uuids or [])),
+                            },
+                        },
+                    },
+                }
+            except Exception:
+                pass
+
+        return resp
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Thinkchain generate error: {e}")
+        # Try to log session failure if we have identifiers
+        try:
+            if chain_id and session_id:
+                thinkchain_log_service.log_session_end(
+                    chain_id=chain_id,
+                    session_id=session_id,
+                    status="failed",
+                    details={"error": str(e)},
+                )
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail=f"执行失败: {str(e)}")
