@@ -56,6 +56,16 @@ class ThinkchainStateEngine:
         self.convergence_stability: int = 2
         self.session_ttl: timedelta = timedelta(hours=1)
 
+    @staticmethod
+    def _stable_rand_int(seed: str, lo: int, hi: int) -> int:
+        """Deterministic integer in [lo, hi] based on a stable hash."""
+        import hashlib
+        if lo > hi:
+            lo, hi = hi, lo
+        digest = hashlib.md5(seed.encode("utf-8")).hexdigest()
+        val = int(digest[:8], 16)
+        return lo + (val % (hi - lo + 1))
+
     async def process_request(
         self,
         *,
@@ -83,16 +93,14 @@ class ThinkchainStateEngine:
         )
 
         async with session.lock:
-            if self._should_converge(session):
-                final_result = self._build_final(session)
-                return final_result, True, session.session_id
-
+            # Strictly follow the planned chain; do not converge early before executing this step
             step_index = session.current_step
             step_result = await self._execute_step(session, step_index)
             session.add_step_result(step_result)
 
-            is_completed = self._should_converge(session) or (
-                session.current_step >= min(self.max_steps, len(session.steps))
+            # Complete only when planned steps (bounded by max_steps) are exhausted
+            is_completed = session.current_step >= min(
+                self.max_steps, len(session.steps)
             )
             if is_completed:
                 final_result = self._build_final(session)
@@ -169,8 +177,18 @@ class ThinkchainStateEngine:
 
     async def _execute_step(self, sess: ExecSession, step_index: int) -> Dict[str, Any]:
         started = time.time()
-        step_def = sess.steps[step_index] if step_index < len(sess.steps) else {}
-        step_title = str(step_def.get("title") or f"步骤{step_index}")
+        # Clamp to chain path: if out of range, directly finalize to avoid stray titles
+        if step_index >= len(sess.steps):
+            final_result = self._build_final(sess)
+            return {
+                **final_result,
+                "step": max(step_index - 1, 0),
+                "status": "finalized",
+            }
+
+        step_def = sess.steps[step_index]
+        # Always align with chain-defined title/description
+        step_title = str(step_def.get("title") or "")
         step_desc = str(step_def.get("description") or "")
 
         # 检查是否为文件审阅步骤
@@ -185,7 +203,9 @@ class ThinkchainStateEngine:
                 content_type = "file_summary"
             # 如果是提示词优化步骤，进行模板检索与细粒度优化（Top-3）
             elif is_prompt_opt_step:
-                content = await self._generate_prompt_optimization(sess, step_index, step_desc)
+                content = await self._generate_prompt_optimization(
+                    sess, step_index, step_desc
+                )
                 content_type = "prompt_optimization"
             else:
                 # 正常执行LLM生成
@@ -221,20 +241,49 @@ class ThinkchainStateEngine:
             }
 
     def _build_prompt(self, sess: ExecSession, i: int, title: str, desc: str) -> str:
-        lang_label = "中文" if (sess.language or "zh") == "zh" else "English"
+        lang_is_zh = (sess.language or "zh") == "zh"
+        lang_label = "中文" if lang_is_zh else "English"
+        # 通过会话与步骤生成稳定随机目标（3~5），避免多次轮询抖动
+        substeps_target = self._stable_rand_int(f"{sess.session_id}|{i}|{title}", 3, 5)
+
         base = f"""
-任务：围绕主题"{sess.topic}"的【{title}】阶段产出结构化内容，输出JSON对象或结构化Markdown。
+任务：围绕主题"{sess.topic}"的【{title}】阶段产出结构化内容，仅输出一个 JSON 对象。
 
 任务类型：{sess.task_type}
 当前步骤序号：{i}
 输出语言：{lang_label}
 步骤描述：{desc}
 
-约束：
-1) 优先输出标准JSON（含 chapters/items/points/sections 等结构），否则输出结构化Markdown
-2) 内容具体可执行，避免空泛描述
-3) 子项数量建议 3-5 个
-4) 标记至少 2 个子项为需要详情展示（showDetail:true），详情类型从 text/list/table/image 中选择，且 text 详情最多 1 个
+输出格式（必须严格遵守以下 JSON 结构，仅返回 JSON，不要返回解释或多余文本）：
+{{
+  "title": "{title}",
+  "description": "不少于100字的自然语言，说明本步骤的目标、边界、交付产出与验收要点。",
+  "chapters": [],
+  "items": [],
+  "points": [],
+  "meta": {{
+    "summary": "不少于100字的摘要，归纳关键洞见、实施路径与风险缓释。",
+    "substeps": [
+      {{
+        "text": "小标题或要点",
+        "showDetail": true,
+        "detailType": "text|list|table",
+        "detailPayload": {{
+          "format": "markdown",
+          "content": "不少于100字的细节内容，包含行动项、交付件与评估方式。"
+        }}
+      }}
+      // 共 {substeps_target} 个子项，严格输出 {substeps_target} 个
+    ]
+  }}
+}}
+
+严格要求：
+1) 子项数量必须严格为 {substeps_target} 个；
+2) 所有子项 `showDetail` 必须为 true；`detailType` 仅可为 text/list/table；
+3) `description` ≥ 100 字，`meta.summary` ≥ 100 字，`substeps[*].detailPayload.content` ≥ 100 字；
+4) 内容必须可执行、可验证，避免空泛；示例字段可为空数组，但需保留键；
+5) 仅返回 JSON，不能出现 JSON 之外的任何解释性文本或 Markdown。
 """
         if i > 0 and sess.step_results:
             prev = sess.step_results[-1].get("content", {})
@@ -242,10 +291,10 @@ class ThinkchainStateEngine:
                 prev_json = json.dumps(prev, ensure_ascii=False)[:1000]
             except Exception:
                 prev_json = str(prev)[:1000]
-            base += f"\n前一输出节选：\n{prev_json}\n请在本步深化与拓展。\n"
+            base += f"\n上下文：前一输出节选（供参考，不必重复）：\n{prev_json}\n请在本步在此基础上深化与拓展，并保持字段一致。\n"
         if sess.reference_content and i == 0:
-            base += f"\n参考材料（节选）：\n{sess.reference_content[:1000]}\n请适当融入相关信息。\n"
-        base += "\n请直接给出内容，不要解释。"
+            base += f"\n参考材料（节选，仅供参考，不要粘贴原文）：\n{sess.reference_content[:1000]}\n请结合其中的有效信息，但保持原创表达。\n"
+        base += "\n只返回合法 JSON。"
         return base.strip()
 
     def _parse_response(self, response: str) -> Any:
@@ -314,7 +363,7 @@ class ThinkchainStateEngine:
     ) -> Dict[str, Any]:
         """
         生成“提示词优化与验收标准”步骤内容：
-        - 从推荐模板库按主题检索 Top-3
+        - 从推荐模板库按主题检索 Top-1
         - 拉取详情并针对当前 topic/language 优化
         - 如果推荐库为空或无匹配，基于 overview 中该步的 description 生成 1 条“系统内置优化模板”
         返回结构：{"summary": str, "templates_considered": int, "substeps": [{name, before, after}]}
@@ -325,7 +374,7 @@ class ThinkchainStateEngine:
         topic = sess.topic
         lang = sess.language or "zh"
 
-        # 1) 检索相关模板（按名称模糊匹配 topic），最多 Top-3
+        # 1) 检索相关模板（按名称模糊匹配 topic），最多 Top-1
         try:
             overview = service.list_prompts(
                 prompt_type="recommended", name_filter=topic, page=1, page_size=20
@@ -351,7 +400,9 @@ class ThinkchainStateEngine:
             before = step_desc.strip() or (
                 f"请围绕主题‘{topic}’输出高质量提示词，包含任务目标、输入边界、输出格式、验收标准等要素。"
             )
-            after = await self._refine_prompt(before, topic=topic, task_type=sess.task_type, language=lang)
+            after = await self._refine_prompt(
+                before, topic=topic, task_type=sess.task_type, language=lang
+            )
             substeps.append(
                 {
                     "name": "系统内置优化模板",
@@ -370,7 +421,7 @@ class ThinkchainStateEngine:
                 "substeps": substeps,
             }
 
-        # 若有推荐库但未匹配到，则退化为取库内最新 Top-3 进行优化
+        # 若有推荐库但未匹配到，则退化为取库内最新 Top-1 进行优化
         if not candidates:
             try:
                 fallback = service.list_prompts(
@@ -381,7 +432,7 @@ class ThinkchainStateEngine:
                 candidates = []
 
         # 2) 拉取 Top-3 的详情并优化
-        selected = candidates[:3]
+        selected = candidates[:1]
         for item in selected:
             try:
                 tpl_id = item.get("id")
@@ -393,7 +444,9 @@ class ThinkchainStateEngine:
                 after = await self._refine_prompt(
                     before, topic=topic, task_type=sess.task_type, language=lang
                 )
-                substeps.append({"id": tpl_id, "name": tpl_name, "before": before, "after": after})
+                substeps.append(
+                    {"id": tpl_id, "name": tpl_name, "before": before, "after": after}
+                )
             except Exception as e:
                 logger.warning(f"Optimize prompt failed for {item}: {e}")
                 continue
@@ -403,8 +456,12 @@ class ThinkchainStateEngine:
             before = step_desc.strip() or (
                 f"请围绕主题‘{topic}’输出高质量提示词，包含任务目标、输入边界、输出格式、验收标准等要素。"
             )
-            after = await self._refine_prompt(before, topic=topic, task_type=sess.task_type, language=lang)
-            substeps.append({"name": "系统内置优化模板", "before": before, "after": after})
+            after = await self._refine_prompt(
+                before, topic=topic, task_type=sess.task_type, language=lang
+            )
+            substeps.append(
+                {"name": "系统内置优化模板", "before": before, "after": after}
+            )
 
         summary = (
             f"已优化 {len(substeps)} 个推荐模板"
@@ -424,9 +481,7 @@ class ThinkchainStateEngine:
         try:
             llm = LLM()
             lang_label = "中文" if (language or "zh") == "zh" else "English"
-            system = (
-                "You are an expert prompt engineer. Return only the improved prompt body, no explanations."
-            )
+            system = "You are an expert prompt engineer. Return only the improved prompt body, no explanations."
             user = (
                 f"主题/Topic: {topic}\n"
                 f"任务类型/Task Type: {task_type}\n"
@@ -439,7 +494,11 @@ class ThinkchainStateEngine:
                 "- 保持与原模板风格一致；\n"
                 "- 仅返回优化后的模板正文（纯文本/Markdown），不要解释。"
             )
-            resp = await llm.ask([Message.system_message(system), Message.user_message(user)], stream=False, temperature=0.2)
+            resp = await llm.ask(
+                [Message.system_message(system), Message.user_message(user)],
+                stream=False,
+                temperature=0.2,
+            )
             return (resp or "").strip()
         except Exception as e:
             logger.warning(f"Refine prompt failed: {e}")

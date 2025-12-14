@@ -6,6 +6,45 @@ matching the frontend expectation, while omitting schemaVersion.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+import hashlib
+import random
+
+# Minimal, local defaults. Can be made configurable later.
+MIN_DESC_CHARS = 100
+MIN_SUMMARY_CHARS = 100
+MIN_DETAIL_CHARS = 100
+
+
+def _stable_rand_int(seed: str, lo: int, hi: int) -> int:
+    """Deterministic integer in [lo, hi] based on stable md5 of seed."""
+    if lo > hi:
+        lo, hi = hi, lo
+    digest = hashlib.md5(seed.encode("utf-8")).hexdigest()
+    val = int(digest[:8], 16)
+    return lo + (val % (hi - lo + 1))
+
+
+def _ensure_min_chars(text: str, min_chars: int, scaffold: List[str]) -> str:
+    """
+    Ensure `text` has at least `min_chars` characters by appending
+    coherent sentences built from provided scaffold items.
+    """
+    text = (text or "").strip()
+    if len(text) >= min_chars:
+        return text
+    extras: List[str] = []
+    for s in scaffold:
+        s = (s or "").strip()
+        if not s:
+            continue
+        extras.append(s)
+        if len(text) + sum(len(x) for x in extras) + len(extras) * 1 >= min_chars:
+            break
+    if extras:
+        joiner = "\n\n" if "\n" in text else "。"
+        text = f"{text}{joiner}".strip(joiner)
+        text = text + ("\n\n" if joiner == "\n\n" else "") + ("；".join(extras) + "。")
+    return text
 
 
 def _localized(language: str, zh: str, en: str) -> str:
@@ -174,18 +213,23 @@ def normalize_step_result(
         }
 
     title = step_name
-    description = _localized(language, f"围绕「{topic}」的{step_name}。", f"{step_name} for '{topic}'.")
+    description = _localized(
+        language,
+        f"围绕「{topic}」的{step_name}，需要给出可执行要点与产出说明。",
+        f"{step_name} for '{topic}', with actionable points and deliverables.",
+    )
 
     summary: Optional[str] = None
     substeps: List[Dict[str, Any]] = []
-    SUBSTEP_CAP = 5
+    # Target substep count derived from a stable per-step seed (3~5)
+    SUBSTEP_TARGET = _stable_rand_int(f"{topic}|{step_name}|{step}", 3, 5)
 
     def add_sub(text: str) -> None:
         nonlocal substeps
         text = (text or "").strip()
         if not text:
             return
-        if len(substeps) >= SUBSTEP_CAP:
+        if len(substeps) >= SUBSTEP_TARGET:
             return
         substeps.append(
             {
@@ -198,7 +242,7 @@ def normalize_step_result(
         )
 
     def traverse(obj: Any) -> None:
-        if len(substeps) >= SUBSTEP_CAP:
+        if len(substeps) >= SUBSTEP_TARGET:
             return
         if isinstance(obj, dict):
             nonlocal summary
@@ -228,7 +272,7 @@ def normalize_step_result(
                 for ln in lines:
                     if len(ln) >= 6:
                         add_sub(ln)
-                        if len(substeps) >= SUBSTEP_CAP:
+                        if len(substeps) >= SUBSTEP_TARGET:
                             break
 
     if isinstance(content, dict) and "final" in content:
@@ -247,11 +291,41 @@ def normalize_step_result(
     else:
         traverse(content)
 
+    # Prefer meta from model output if present
+    if isinstance(content, dict) and isinstance(content.get("meta"), dict):
+        meta_dict = content.get("meta")
+        cand_summary = meta_dict.get("summary")
+        if isinstance(cand_summary, str) and cand_summary.strip():
+            summary = cand_summary.strip()
+        cand_substeps = meta_dict.get("substeps")
+        if isinstance(cand_substeps, list) and cand_substeps:
+            # Normalize provided substeps structure
+            normalized: List[Dict[str, Any]] = []
+            for idx, it in enumerate(cand_substeps, start=1):
+                if not isinstance(it, dict):
+                    continue
+                txt = str(it.get("text") or it.get("title") or it.get("name") or f"子项{idx}")
+                show = bool(it.get("showDetail", False))
+                dtype = it.get("detailType") if show else None
+                dp = it.get("detailPayload") if show else None
+                normalized.append(
+                    {
+                        "key": f"{step}-{len(normalized) + 1}",
+                        "text": txt[:160],
+                        "showDetail": show,
+                        "detailType": dtype if isinstance(dtype, str) else None,
+                        "detailPayload": dp if isinstance(dp, dict) else None,
+                    }
+                )
+            # Merge with auto-extracted ones to ensure diversity
+            if normalized:
+                substeps = normalized
+
     if not summary:
         summary = _localized(
             language,
-            f"{step_name}：围绕「{topic}」梳理关键要点。",
-            f"{step_name}: Key points for '{topic}'.",
+            f"{step_name}：围绕「{topic}」梳理关键要点、实施路径与产出形式，确保结果可检查、可交付。",
+            f"{step_name}: Organize key points, execution path and deliverables for '{topic}', ensuring verifiability.",
         )
 
     if not substeps:
@@ -263,48 +337,70 @@ def normalize_step_result(
         for txt in placeholders:
             add_sub(txt)
 
-    if len(substeps) > SUBSTEP_CAP:
-        substeps = substeps[:SUBSTEP_CAP]
+    # Adjust to target count (fill or trim)
+    if len(substeps) < SUBSTEP_TARGET:
+        # Fill placeholders to reach target
+        i = 1
+        while len(substeps) < SUBSTEP_TARGET and i <= 5:
+            add_sub(f"{step_name}—补充要点{i}")
+            i += 1
 
-    # even index detail display and diversity
-    allowed_types = ["text", "image", "list", "table"]
-    non_text_types = ["image", "list", "table"]
+    if len(substeps) > SUBSTEP_TARGET:
+        substeps = substeps[:SUBSTEP_TARGET]
+
+    # Enforce detail visibility and restrict types to {text, list, table}
+    allowed_types = ["text", "list", "table"]
 
     text_count = 0
     detail_count = 0
 
+    # Ensure description and summary meet minimum length
+    base_scaffold = [s.get("text", "") for s in substeps][:3]
+    description = _ensure_min_chars(description, MIN_DESC_CHARS, base_scaffold)
+    summary = _ensure_min_chars(summary or description, MIN_SUMMARY_CHARS, base_scaffold)
+
     base_text = summary or description or title
 
     for idx, s in enumerate(substeps, start=1):
-        s["showDetail"] = idx % 2 == 0
-        if s["showDetail"]:
-            detail_count += 1
-            inferred = _infer_detail_type_from_text(base_text)
-            if inferred == "text" and text_count >= 1:
-                dt = non_text_types[(detail_count - 1) % len(non_text_types)]
-            else:
-                dt = inferred
-            if dt not in allowed_types:
-                dt = non_text_types[(detail_count - 1) % len(non_text_types)]
-            if dt == "text":
-                text_count += 1
-            s["detailType"] = dt
-            heading = s.get("text") or title
-            if dt == "text":
-                md = f"### {heading}\n\n{base_text}"
-            elif dt == "list":
-                md = f"### {heading}\n\n- {base_text}\n- 详细说明\n- 补充要点"
-            elif dt == "table":
-                md = (
-                    f"### {heading}\n\n| 项目 | 描述 |\n|---|---|\n| 主要内容 | {base_text} |\n| 关键要点 | 详细说明 |"
-                )
-            else:  # image
-                md = f"### {heading}\n\n![{heading}](placeholder.jpg)\n\n> {base_text}"
-            s["detailPayload"] = {"format": "markdown", "content": md}
-            if dt == "image":
-                s["detailPayload"].update(
-                    {"imageUrl": "placeholder.jpg", "alt": heading, "caption": base_text}
-                )
+        # 强制展示细节
+        s["showDetail"] = True
+        detail_count += 1
+
+        # 依据内容推断类型，但严格限定到 {text, list, table}
+        inferred = _infer_detail_type_from_text(base_text)
+        if inferred not in allowed_types:
+            inferred = "list"
+        # 控制 text 类型最多 1 个
+        if inferred == "text" and text_count >= 1:
+            inferred = "list"
+        dt = inferred
+        if dt == "text":
+            text_count += 1
+        s["detailType"] = dt
+
+        heading = s.get("text") or title
+        if dt == "text":
+            md_core = f"{base_text}\n\n- 关键行动：明确里程碑与责任分工\n- 实施要点：聚焦依赖与风险缓释\n- 评估指标：以结果与过程双维度校验"
+            md = f"### {heading}\n\n{_ensure_min_chars(md_core, MIN_DETAIL_CHARS, base_scaffold)}"
+        elif dt == "list":
+            md_core = (
+                f"- 背景：{base_text}\n"
+                "- 步骤：分解为3~5个可执行任务\n"
+                "- 工具：给出方法与模板\n"
+                "- 风险：列出主要阻碍与规避策略\n"
+                "- 产出：定义交付件与验收标准"
+            )
+            md = f"### {heading}\n\n{_ensure_min_chars(md_core, MIN_DETAIL_CHARS, base_scaffold)}"
+        else:  # table
+            table = (
+                "| 条目 | 说明 |\n|---|---|\n"
+                f"| 主要内容 | {base_text} |\n"
+                "| 实施步骤 | 3~5个动作，各自有负责人与时间点 |\n"
+                "| 风险与对策 | 标注优先级与缓解手段 |\n"
+                "| 交付与验收 | 明确格式、完成定义与评估方式 |"
+            )
+            md = f"### {heading}\n\n{_ensure_min_chars(table, MIN_DETAIL_CHARS, base_scaffold)}"
+        s["detailPayload"] = {"format": "markdown", "content": md}
 
     return {
         "key": str(step),

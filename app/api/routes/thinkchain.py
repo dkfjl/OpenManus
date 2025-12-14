@@ -108,7 +108,7 @@ async def thinkchain_overview_endpoint(
             )
 
         chain_id = await thinkchain_registry.create_chain(
-            topic=topic.strip(),
+            topic=(optimized_topic.strip() if isinstance(optimized_topic, str) and optimized_topic.strip() else topic.strip()),
             task_type=ttype,
             language=language or "zh",
             steps=normalized_steps,
