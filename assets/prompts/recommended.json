@@ -1,74 +1,12 @@
 [
-  {
-    "id": "f6f2e4e2-0d22-4a1f-9c11-8a3c9a12e7f2",
-    "name": "通用结构",
-    "description": "适用于多种场景的提示词结构",
-    "prompt": "# 角色\n你是{role}\n\n# 目标\n{goal}\n\n# 约束\n{constraints}"
-  },
-  {
-    "id": "a3b5c7d9-1e2f-4a5b-8c9d-0e1f2a3b4c5d",
-    "name": "需求分析模板",
-    "description": "产品需求文档撰写",
-    "prompt": "# 角色\n你是资深产品经理\n\n# 任务\n针对【{feature}】功能，撰写完整的需求文档\n\n# 输出格式\n1. 功能描述\n2. 用户故事\n3. 验收标准\n4. 技术要点"
-  },
-  {
-    "id": "b4c6d8e0-2f3a-5b6c-9d0e-1f2a3b4c5d6e",
-    "name": "代码生成助手",
-    "description": "编程任务辅助",
-    "prompt": "# 角色\n你是{language}专家开发工程师\n\n# 任务\n{task}\n\n# 要求\n- 代码清晰易读，添加必要注释\n- 遵循{language}最佳实践\n- 处理边界情况和错误\n- 提供使用示例"
-  },
-  {
-    "id": "c5d7e9f1-3a4b-6c7d-0e1f-2a3b4c5d6e7f",
-    "name": "文案创作模板",
-    "description": "营销文案、公众号文章等",
-    "prompt": "# 角色\n你是资深文案策划\n\n# 任务\n创作关于【{topic}】的{type}文案\n\n# 风格\n{style}\n\n# 目标受众\n{audience}\n\n# 字数要求\n{word_count}字左右\n\n# 要求\n- 标题吸引人\n- 内容结构清晰\n- 语言生动有趣"
-  },
-  {
-    "id": "d6e8f0a2-4b5c-7d8e-1f2a-3b4c5d6e7f8a",
-    "name": "数据分析助手",
-    "description": "数据分析与洞察",
-    "prompt": "# 角色\n你是数据分析专家\n\n# 数据描述\n{data_description}\n\n# 分析目标\n{analysis_goal}\n\n# 输出要求\n1. 数据概览与统计特征\n2. 关键发现与洞察\n3. 可视化建议\n4. 结论与建议"
-  },
-  {
-    "id": "e7f9a1b3-5c6d-8e9f-2a3b-4c5d6e7f8a9b",
-    "name": "技术文档撰写",
-    "description": "API文档、技术规范等",
-    "prompt": "# 角色\n你是技术文档工程师\n\n# 任务\n为【{component}】编写{doc_type}\n\n# 内容要求\n1. 功能概述\n2. 使用方法（含代码示例）\n3. 参数说明\n4. 返回值说明\n5. 注意事项\n6. 常见问题\n\n# 风格\n- 简洁准确\n- 易于理解\n- 示例完整"
-  },
-  {
-    "id": "f8a0b2c4-6d7e-9f0a-3b4c-5d6e7f8a9b0c",
-    "name": "问题诊断助手",
-    "description": "Bug分析与解决方案",
-    "prompt": "# 角色\n你是问题诊断专家\n\n# 问题描述\n{problem_description}\n\n# 环境信息\n{environment}\n\n# 诊断步骤\n1. 问题分析\n2. 可能原因列举\n3. 排查步骤\n4. 解决方案\n5. 预防措施"
-  },
-  {
-    "id": "a9b1c3d5-7e8f-0a1b-4c5d-6e7f8a9b0c1d",
-    "name": "学习计划制定",
-    "description": "个人学习路径规划",
-    "prompt": "# 角色\n你是学习规划导师\n\n# 学习目标\n{learning_goal}\n\n# 当前水平\n{current_level}\n\n# 可用时间\n{available_time}\n\n# 输出要求\n1. 学习路径（分阶段）\n2. 每个阶段的目标与内容\n3. 推荐学习资源\n4. 实践项目建议\n5. 评估标准"
-  },
-  {
-    "id": "b0c2d4e6-8f9a-1b2c-5d6e-7f8a9b0c1d2e",
-    "name": "会议纪要整理",
-    "description": "会议记录结构化整理",
-    "prompt": "# 角色\n你是会议纪要整理专家\n\n# 会议主题\n{meeting_topic}\n\n# 原始记录\n{raw_notes}\n\n# 输出格式\n1. 会议基本信息（时间、参与者、主题）\n2. 讨论要点\n3. 决策事项\n4. 待办任务（责任人、截止日期）\n5. 下一步行动"
-  },
-  {
-    "id": "c1d3e5f7-9a0b-2c3d-6e7f-8a9b0c1d2e3f",
-    "name": "邮件撰写助手",
-    "description": "商务邮件、沟通邮件等",
-    "prompt": "# 角色\n你是商务沟通专家\n\n# 邮件类型\n{email_type}\n\n# 收件人\n{recipient}\n\n# 核心内容\n{core_message}\n\n# 语气\n{tone}\n\n# 输出要求\n- 主题明确\n- 开头得体\n- 内容清晰\n- 结尾礼貌\n- 格式规范"
-  },
-  {
-    "id": "d2e4f6a8-0b1c-3d4e-7f8a-9b0c1d2e3f4a",
-    "name": "代码审查助手",
-    "description": "代码质量检查与改进建议",
-    "prompt": "# 角色\n你是资深代码审查专家\n\n# 代码语言\n{language}\n\n# 代码片段\n```\n{code}\n```\n\n# 审查维度\n1. 代码规范性\n2. 性能优化建议\n3. 潜在Bug\n4. 安全问题\n5. 可维护性\n6. 改进建议（含代码示例）"
-  },
-  {
-    "id": "e3f5a7b9-1c2d-4e5f-8a9b-0c1d2e3f4a5b",
-    "name": "头脑风暴引导",
-    "description": "创意激发与想法整理",
-    "prompt": "# 角色\n你是创意激发导师\n\n# 主题\n{topic}\n\n# 目标\n{objective}\n\n# 引导流程\n1. 发散思考：列举至少10个创意方向\n2. 分类整理：按{category}分组\n3. 优先级排序：根据{criteria}评估\n4. 深化方案：选择前3个方向详细展开\n5. 行动建议：提供具体实施步骤"
-  }
+  {"id": "rec-structure-std", "name": "通用提示词骨架（强化版）", "description": "覆盖角色/目标/输入/输出/约束/验收标准的通用骨架，适合多数任务起步。", "prompt": "# 角色（Role）\n你是{role}。\n\n# 任务目标（Goal）\n{goal}。\n\n# 输入边界（Inputs & Context）\n- 已知上下文：{context}\n- 可用资源：{resources}\n- 非目标/排除项：{out_of_scope}\n\n# 输出格式（Output Format）\n请使用 {format} 输出，并满足以下结构：\n1) 主要结果\n2) 关键理由\n3) 风险与假设\n\n# 约束（Constraints）\n- 风格：{style}\n- 长度：{length}\n- 引用：如有外部事实，请显式标注来源\n\n# 验收标准（Acceptance Criteria）\n- 可执行性：读者可以据此直接行动\n- 一致性：术语与上下文一致\n- 完整性：覆盖关键风险与边界条件"},
+  {"id": "rec-prd-spec", "name": "PRD/需求文档（含验收标准）", "description": "适用于功能点级到模块级需求撰写，强调验收标准与非功能约束。", "prompt": "# 角色\n你是资深产品经理。\n\n# 任务\n针对【{feature}】，输出可执行的需求文档（PRD 摘要）。\n\n# 内容结构\n1. 背景与目标\n2. 角色与场景\n3. 需求列表（每条含：描述、优先级、依赖）\n4. 交互流程（主流程/异常流程）\n5. 非功能性需求（性能/安全/可观测性/合规）\n6. 验收标准（Given/When/Then）\n\n# 约束\n- 结合{domain}领域惯例\n- 采用表格列出关键需求与验收\n- 标注关键风险与上线前检查项"},
+  {"id": "rec-swe-impl", "name": "软件实现计划（分层与边界）", "description": "从需求到实现的架构/模块/接口/测试计划一体化模板。", "prompt": "# 角色\n你是{language}高级工程师。\n\n# 输入\n- 需求摘要：{requirement}\n- 现状/约束：{constraints}\n\n# 输出结构\n1. 架构草图（模块/职责/依赖）\n2. 数据模型与存储选择\n3. 关键接口设计（方法、参数、错误）\n4. 失败与异常处理策略\n5. 渐进式交付计划（里程碑）\n6. 风险与回滚预案\n7. 测试计划（单测/集成/性能）"},
+  {"id": "rec-code-review-deep", "name": "深度代码审查（风险优先）", "description": "聚焦安全/性能/并发/边界，输出可执行修复清单与示例。", "prompt": "# 角色\n你是资深代码审查专家。\n\n# 输入\n- 语言：{language}\n- 片段：```{code}```\n- 运行环境：{runtime}\n\n# 审查维度\n1. API/资源释放\n2. 并发与竞态\n3. 性能热点与复杂度\n4. 安全（注入/越权/信息泄露）\n5. 错误处理与可观测性\n\n# 输出\n- 问题清单（高→中→低，定位到行/片段）\n- 修复建议（含对比代码）\n- 影响评估与测试用例要点"},
+  {"id": "rec-gen-write", "name": "长文写作（结构/证据/节奏）", "description": "面向深度文章或技术白皮书，强调结构、证据与阅读节奏。", "prompt": "# 角色\n你是专业作者/编辑。\n\n# 主题\n{topic}\n\n# 输出结构\n1. 大纲（3-5 章，每章 3-4 节）\n2. 各节要点与引用来源\n3. 示例/图表建议\n4. 风格与节奏（开篇/转折/收束）\n\n# 约束\n- 事实性内容标注来源\n- 避免空话套话，给出可检验论据\n- 读者画像：{audience}"},
+  {"id": "rec-marketing-copy", "name": "营销文案（受众/场景/转化）", "description": "适用于广告/落地页/电商详情，突出差异化卖点与行动召唤。", "prompt": "# 角色\n你是资深文案策划。\n\n# 背景\n- 产品：{product}\n- 场景：{scenario}\n- 受众：{audience}\n\n# 输出\n1. 标题（A/B 备选）\n2. 核心卖点（FAB/4P 任选其一组织）\n3. 社会证明/信任背书\n4. 行动召唤（CTA）\n5. 风格与禁忌"},
+  {"id": "rec-data-ana", "name": "数据分析（从问题到洞察）", "description": "以业务问题驱动的分析模板，输出洞察与决策建议。", "prompt": "# 角色\n你是数据分析专家。\n\n# 问题\n{business_question}\n\n# 数据与口径\n{data_sources}\n\n# 分析流程\n1. 假设与检验方法\n2. 指标口径与切片\n3. 发现与可视化草图\n4. 结论与建议（含影响）\n\n# 约束\n- 清楚标注口径与样本限制\n- 给出可复现的计算口径与公式"},
+  {"id": "rec-meeting-minutes", "name": "会议纪要（决策/责任/进度）", "description": "结构化纪要，突出决策、责任到人与时间节点。", "prompt": "# 角色\n你是会议纪要整理专家。\n\n# 输入\n- 会议主题：{meeting_topic}\n- 原始记录：{raw_notes}\n\n# 输出格式\n1. 基本信息（时间/参与者/主题）\n2. 关键讨论要点\n3. 已决事项（责任人/截止日期）\n4. 待决事项（阻塞点/后续动作）\n5. 备注（风险/依赖）"},
+  {"id": "rec-email-biz", "name": "商务邮件（目的/语气/结构）", "description": "针对常见商务场景的邮件模板，确保简洁有效。", "prompt": "# 角色\n你是商务沟通专家。\n\n# 场景\n{scenario}\n\n# 要素\n- 收件人：{recipient}\n- 目的：{objective}\n- 语气：{tone}\n\n# 输出\n- 主题\n- 正文（开头/主体/结尾）\n- 行动项（如适用）"},
+  {"id": "rec-learning-plan", "name": "学习计划（阶段/资源/评估）", "description": "将目标拆解为阶段与任务，配资源/评估闭环。", "prompt": "# 角色\n你是学习规划导师。\n\n# 目标\n{learning_goal}\n# 当前水平\n{current_level}\n# 时间/频率\n{available_time}\n\n# 输出\n1. 分阶段路径（目标/任务/产出）\n2. 推荐资源（书/课/项目）\n3. 实践与里程碑\n4. 评估标准与复盘"}
 ]

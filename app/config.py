@@ -271,6 +271,17 @@ class StorageSettings(BaseModel):
     )
 
 
+class PromptStorageSettings(BaseModel):
+    """Prompt library storage backend configuration"""
+
+    backend: str = Field(
+        "fs", description="Storage backend: 'fs' for filesystem, 'sqlite' for SQLite"
+    )
+    sqlite_path: Optional[str] = Field(
+        None, description="Path to SQLite DB file when backend=sqlite"
+    )
+
+
 class ChatInsertSettings(BaseModel):
     """Configuration for chat data insertion (DB + pricing)."""
 
@@ -461,6 +472,10 @@ class AppConfig(BaseModel):
         None,
         description="Object storage configuration for report files"
     )
+    prompt_storage: PromptStorageSettings = Field(
+        default_factory=PromptStorageSettings,
+        description="Prompt library storage backend configuration",
+    )
 
     class Config:
         arbitrary_types_allowed = True
@@ -631,6 +646,10 @@ class Config:
         else:
             storage_settings = None
 
+        # Prompt storage backend configuration
+        prompt_storage_cfg = raw_config.get("prompt_storage", {})
+        prompt_storage_settings = PromptStorageSettings(**prompt_storage_cfg)
+
         config_dict = {
             "llm": {
                 "default": default_settings,
@@ -652,6 +671,7 @@ class Config:
             "dify_config": dify_settings,
             "chat_insert_config": chat_settings,
             "storage_config": storage_settings,
+            "prompt_storage": prompt_storage_settings,
         }
 
         self._config = AppConfig(**config_dict)
@@ -729,6 +749,11 @@ class Config:
     def root_path(self) -> Path:
         """Get the root path of the application"""
         return PROJECT_ROOT
+
+    @property
+    def prompt_storage(self) -> PromptStorageSettings:
+        """Get prompt library storage backend configuration"""
+        return self._config.prompt_storage
 
 
 config = Config()

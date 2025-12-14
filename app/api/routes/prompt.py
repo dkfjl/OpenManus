@@ -20,6 +20,8 @@ from app.schemas.prompt import (
 )
 from app.services.prompt_service import PromptService
 from app.services.prompt_storage import PromptStorage
+from app.services.prompt_sqlite_storage import PromptSQLiteStorage
+from app.config import config
 from app.logger import logger
 
 
@@ -37,21 +39,36 @@ def get_prompt_service() -> PromptService:
     """获取提示词服务实例（依赖注入）"""
     global _prompt_service
     if _prompt_service is None:
+        # Env first, then config
+        backend = os.getenv("PROMPT_STORAGE_BACKEND") or config.prompt_storage.backend
+        backend = (backend or "fs").lower()
+        sqlite_path_env = os.getenv("PROMPT_SQLITE_PATH") or config.prompt_storage.sqlite_path
         storage_dir = os.getenv("PROMPT_STORAGE_DIR")
-        if storage_dir:
-            try:
-                storage = PromptStorage(storage_dir=FSPath(storage_dir))
+
+        try:
+            if backend == "sqlite":
+                # 默认放在 db/prompt_library.db（项目根目录下的 db 目录）
+                if sqlite_path_env:
+                    db_path = FSPath(sqlite_path_env)
+                else:
+                    db_path = (config.root_path / "db" / "prompt_library.db").resolve()
+                storage = PromptSQLiteStorage(db_path=db_path)
                 logger = __import__("app.logger", fromlist=["logger"]).logger
-                logger.info(f"[PromptRouter] Using custom storage dir: {storage.storage_dir}")
+                logger.info(f"[PromptRouter] Using SQLite storage at: {storage.paths.db_file}")
                 _prompt_service = PromptService(storage=storage)
-            except Exception as e:
-                # 回退到默认存储
-                logger = __import__("app.logger", fromlist=["logger"]).logger
-                logger.warning(f"[PromptRouter] Failed to init custom storage: {e}. Falling back to default")
-                _prompt_service = PromptService()
-        else:
+            else:
+                if storage_dir:
+                    storage = PromptStorage(storage_dir=FSPath(storage_dir))
+                    logger = __import__("app.logger", fromlist=["logger"]).logger
+                    logger.info(f"[PromptRouter] Using custom FS storage dir: {storage.storage_dir}")
+                    _prompt_service = PromptService(storage=storage)
+                else:
+                    logger = __import__("app.logger", fromlist=["logger"]).logger
+                    logger.info("[PromptRouter] Using default FS storage dir from config")
+                    _prompt_service = PromptService()
+        except Exception as e:
             logger = __import__("app.logger", fromlist=["logger"]).logger
-            logger.info("[PromptRouter] Using default storage dir from config")
+            logger.warning(f"[PromptRouter] Failed to init requested storage backend: {e}. Falling back to FS")
             _prompt_service = PromptService()
     return _prompt_service
 
