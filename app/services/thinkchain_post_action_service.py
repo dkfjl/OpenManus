@@ -37,7 +37,8 @@ class ThinkchainPostActionService:
             digest_uuid = thinkchain_analysis_service.create_digest_upload_file(
                 chain_id=chain_id, session_id=session_id
             )
-            file_uuids = ",".join([digest_uuid] + (reference_file_uuids or []))
+            # Only pass the digest UUID; it already contains the referenced file context.
+            file_uuids = digest_uuid
             payload = {
                 "topic": topic or "",
                 "language": language or "zh",
@@ -81,7 +82,8 @@ class ThinkchainPostActionService:
             digest_uuid = thinkchain_analysis_service.create_digest_upload_file(
                 chain_id=chain_id, session_id=session_id
             )
-            file_uuids = ",".join([digest_uuid] + (reference_file_uuids or []))
+            # Only pass the digest UUID; it already contains the referenced file context.
+            file_uuids = digest_uuid
             payload = {
                 "topic": topic or "",
                 "language": language or "zh",

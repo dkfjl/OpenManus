@@ -292,7 +292,7 @@ async def thinkchain_generate_endpoint(
                             "params": {
                                 "topic": resolved_topic or "",
                                 "language": resolved_language,
-                                "file_uuids": ",".join([digest_uuid] + (rec.reference_file_uuids or [])),
+                                "file_uuids": digest_uuid,
                             },
                         },
                         "ppt": {
@@ -300,7 +300,7 @@ async def thinkchain_generate_endpoint(
                             "params": {
                                 "topic": resolved_topic or "",
                                 "language": resolved_language,
-                                "file_uuids": ",".join([digest_uuid] + (rec.reference_file_uuids or [])),
+                                "file_uuids": digest_uuid,
                             },
                         },
                     },

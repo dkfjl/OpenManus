@@ -61,7 +61,7 @@ async def generate_enhanced_outline(
         response = await llm.ask(
             [Message.user_message(prompt)],
             stream=False,
-            temperature=0.3,
+            temperature=0.5,
         )
 
         # 解析和验证返回的JSON
