@@ -104,7 +104,14 @@ class ThinkchainOverviewService:
         has_files: bool = False,
         query_text: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Use LLM to extract intents for pre-steps. Fallback to heuristics."""
+        """Use LLM to extract intents for pre-steps. Fallback to heuristics.
+
+        Strict rule (product requirement):
+        - Both kb_specific and kb_generic MUST only trigger when the user intent
+          clearly leans to INTERNAL materials (internal knowledge/docs/intranet/private/confidential).
+        - We enforce this even if the LLM suggests kb_* = true by post-filtering
+          with an `internal_leaning` detection based on strong keywords.
+        """
         text = (query_text or topic or "").strip()
         if not text:
             return {
@@ -114,6 +121,23 @@ class ThinkchainOverviewService:
                 "kb_name": None,
                 "want_kb_generic": False,
             }
+
+        def _has_internal_leaning(s: str) -> bool:
+            s = (s or "").lower()
+            # Strong signals for INTERNAL intent (Chinese + English)
+            strong_terms = [
+                # zh
+                "内部", "内部文档", "内部资料", "内部知识", "公司内部", "集团内", "企业内", "内网",
+                "私有", "保密", "机密", "非公开", "私域", "本地知识库", "私有知识库", "内部wiki",
+                "企业wiki", "内控手册", "内部手册", "sop(内部)", "sop（内部）", "内部sop",
+                # en
+                "internal", "intranet", "private", "confidential", "proprietary",
+                "company-internal", "internal docs", "internal documents", "internal knowledge",
+                "internal kb", "private kb", "internal wiki",
+            ]
+            return any(term in s for term in strong_terms)
+
+        internal_leaning = _has_internal_leaning(text)
 
         sys = (
             "You are an intent classifier. Only output a compact JSON object with the requested fields."
@@ -141,13 +165,16 @@ class ThinkchainOverviewService:
                 raise ValueError("invalid json")
             # Merge has_files as an upper bound
             obj["use_files"] = bool(obj.get("use_files", False) or has_files)
-            # Normalize
+            # Post-filter with internal leaning: both kb flags only allowed if internal intent is clear
+            want_kb_specific = bool(obj.get("want_kb_specific", False)) and internal_leaning
+            want_kb_generic = bool(obj.get("want_kb_generic", False)) and internal_leaning
+            kb_name = obj.get("kb_name") if want_kb_specific and obj.get("kb_name") else None
             return {
                 "use_files": bool(obj.get("use_files", False)),
                 "want_prompt_opt": bool(obj.get("want_prompt_opt", False)),
-                "want_kb_specific": bool(obj.get("want_kb_specific", False)),
-                "kb_name": obj.get("kb_name") if obj.get("kb_name") else None,
-                "want_kb_generic": bool(obj.get("want_kb_generic", False)),
+                "want_kb_specific": want_kb_specific,
+                "kb_name": kb_name,
+                "want_kb_generic": want_kb_generic,
             }
         except Exception:
             # Heuristic fallback
@@ -161,11 +188,17 @@ class ThinkchainOverviewService:
 
             m = re.search(r"(?:知识库|kb)[:：\s]*([\w\-\u4e00-\u9fa5]{2,32})", s, re.IGNORECASE)
             kb_name = m.group(1) if m else None
-            want_kb_specific = kb_name is not None
-            want_kb_generic = any(
-                term in s or term in s_low
-                for term in ["知识库", "kb", "wiki", "百科", "资料库", "文档库", "语料库"]
+            # Enforce internal leaning for kb triggers
+            want_kb_specific = (kb_name is not None) and internal_leaning
+            want_kb_generic = (
+                any(
+                    term in s or term in s_low
+                    for term in ["知识库", "kb", "wiki", "资料库", "文档库", "语料库"]
+                )
+                and internal_leaning
             )
+            if not want_kb_specific:
+                kb_name = None
             return {
                 "use_files": bool(has_files),
                 "want_prompt_opt": want_prompt_opt,

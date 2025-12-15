@@ -68,6 +68,49 @@ def normalize_step_result(
     step = int(step_result.get("step", 0))
     step_name = str(step_result.get("step_name") or f"步骤{step}")
     content = step_result.get("content", {})
+    # 终局分支：最终完善与总结（不生成 meta 内容，但字段保留；description 更鼓舞且务实）
+    content_type = str(step_result.get("content_type") or "")
+    is_finalization = (
+        content_type == "finalization"
+        or (isinstance(content, dict) and "final" in content)
+        or step_name in {"最终完善与总结", "[FINAL] 最终完善与总结"}
+    )
+    if is_finalization:
+        def _final_desc_zh(tp: str, name: str) -> str:
+            base = (
+                f"围绕「{tp}」的{name}：阶段性成果已具雏形，现在把洞见转化为影响。"
+                "请以‘更清晰、更迅速、更可验证’为原则收束工作，并在接下来的一周内完成落地。"
+                "我们建议聚焦三条主线：目标闭环、行动闭环与评估闭环。为此，请立即："
+                "1) 固化核心结论与关键假设，输出一页纸摘要；"
+                "2) 拆解3–5个里程碑，明确负责人与时间点，并对外承诺；"
+                "3) 上线一套最小可行监测面板（指标、阈值、预警），保证复盘与改进。"
+                "这样可以在保持节奏的同时，确保每一步都能被看见、被检验、被持续放大。"
+            )
+            return base
+
+        def _final_desc_en(tp: str, name: str) -> str:
+            base = (
+                f"{name} for '{tp}': we now convert insights into impact. "
+                "Aim for clearer focus, faster iteration, and verifiable outcomes. "
+                "In the coming week, lock the loop on goals, actions, and measurement: "
+                "(1) distill a one‑pager with key conclusions and assumptions; "
+                "(2) break down 3–5 milestones with owners and dates; "
+                "(3) publish a minimal monitoring dashboard (metrics, thresholds, alerts). "
+                "This keeps momentum while making every step visible, testable, and scalable."
+            )
+            return base
+
+        desc = _final_desc_zh(topic, step_name) if (language or "zh").lower().startswith("zh") else _final_desc_en(topic, step_name)
+        # 保证描述不过短
+        desc = _ensure_min_chars(desc, max(MIN_DESC_CHARS, 160), [])
+
+        return {
+            "key": str(step),
+            "title": step_name,
+            "description": desc,
+            "detailType": "text",
+            "meta": {"summary": "", "substeps": []},
+        }
     # 专用分支：文件审阅与要点整合
     # 需求：
     # - substeps[*].text = 引用文件名
@@ -76,6 +119,7 @@ def normalize_step_result(
     # - detailPayload.format = "markdown"
     # - detailPayload.content = 引擎产出的文件摘要 markdown 全文
     # 触发条件：content_type == "file_summary" 或 步骤标题为固定预步骤标题
+    # 以下为普通与预步骤分支
     content_type = str(step_result.get("content_type") or "")
     is_file_review = (
         content_type == "file_summary"
